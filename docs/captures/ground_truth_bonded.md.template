@@ -1,0 +1,25 @@
+# Ground truth — bonded transfer capture
+
+Fill this in **during or immediately after** Capture A, before analyzing Wireshark.
+Copy to `ground_truth_bonded.md` locally (that file is gitignored).
+Correlate these values with ATT indication/notification payloads later.
+
+| Field | Cuff display | medi.connect app | Notes |
+|-------|--------------|------------------|-------|
+| Date / time | | | |
+| Systolic (mmHg) | | | |
+| Diastolic (mmHg) | | | |
+| Pulse (bpm) | | | |
+| User slot (1 or 2) | | | |
+| Cuff fit / position OK? | | | |
+| Rest indicator satisfied? | | | |
+| AFib / arrhythmia flag? | | | |
+| Battery (if shown) | | | |
+
+## Session notes
+
+- Capture file name: `bonded_transfer.btsnoop`
+- Phone model / Android version:
+- Cuff already paired? yes
+- Time from end of measurement to opening app:
+- How many readings transferred (one vs memory dump):

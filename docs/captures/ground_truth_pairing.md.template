@@ -1,0 +1,24 @@
+# Ground truth — fresh pairing capture
+
+Fill this in during Capture B (forget device, re-pair with 6-digit PIN).
+Copy to `ground_truth_pairing.md` locally (that file is gitignored).
+
+| Field | Value |
+|-------|-------|
+| 6-digit PIN shown on cuff | |
+| Pairing prompt on phone | Passkey / PIN entry |
+| Pairing succeeded? | yes / no |
+| Transfer succeeded after pair? | yes / no |
+
+## Session notes
+
+- Capture file name: `fresh_pairing.btsnoop`
+- Phone model / Android version:
+- Forgot in Android BT settings? yes / no
+- Removed from medi.connect? yes / no
+
+After analysis, note in [`../protocol.md`](../protocol.md):
+
+- SMP method observed:
+- GATT service discovery:
+- Newest dumped reading (confirm on cuff/app if possible):
