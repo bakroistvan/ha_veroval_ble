@@ -102,13 +102,26 @@ def _adapter_path_for_device(device_path: str) -> str:
     return device_path.rsplit("/", 1)[0]
 
 
-async def _find_device_path_on_bus(bus: Any, address: str) -> str | None:
-    """Find `/org/bluez/hciX/dev_…` for *address* via ObjectManager."""
+def _dbus_bool(value: Any, default: bool = False) -> bool:
+    """Unwrap a dbus-fast Variant or Python bool."""
+    if value is None:
+        return default
+    inner = getattr(value, "value", value)
+    return bool(inner)
+
+
+async def _get_managed_objects(bus: Any) -> dict[str, Any]:
+    """Return BlueZ GetManagedObjects() (path → interface → properties)."""
     introspection = await bus.introspect(BLUEZ_SERVICE, "/")
     manager = bus.get_proxy_object(
         BLUEZ_SERVICE, "/", introspection
     ).get_interface(OBJECT_MANAGER_INTERFACE)
-    objects = await manager.call_get_managed_objects()
+    return await manager.call_get_managed_objects()
+
+
+async def _find_device_path_on_bus(bus: Any, address: str) -> str | None:
+    """Find `/org/bluez/hciX/dev_…` for *address* via ObjectManager."""
+    objects = await _get_managed_objects(bus)
     target = address.lower()
     for path, interfaces in objects.items():
         device = interfaces.get(DEVICE_INTERFACE)
@@ -117,7 +130,8 @@ async def _find_device_path_on_bus(bus: Any, address: str) -> str | None:
         address_variant = device.get("Address")
         if address_variant is None:
             continue
-        if str(address_variant.value).lower() == target:
+        addr = getattr(address_variant, "value", address_variant)
+        if str(addr).lower() == target:
             return str(path)
     return None
 
@@ -289,7 +303,6 @@ class BlueZPairSession:
                 "In-UI pairing requires Linux BlueZ (Home Assistant OS host adapter)"
             )
 
-        from dbus_fast import Variant
         from dbus_fast.aio import MessageBus
         from dbus_fast.constants import BusType
 
@@ -302,8 +315,8 @@ class BlueZPairSession:
                 "Press User 1 or User 2 so the cuff advertises, then scan again."
             )
 
-        props = await self._device_props()
-        if bool(props.get("Paired", Variant("b", False)).value):
+        props = await self._device1_props()
+        if _dbus_bool(props.get("Paired")):
             _LOGGER.debug("%s is already paired", self.address)
             self.already_paired = True
             await self._set_trusted()
@@ -435,10 +448,7 @@ class BlueZPairSession:
         assert self._bus is not None
         assert self.device_path is not None
         try:
-            introspection = await self._bus.introspect(BLUEZ_SERVICE, self.device_path)
-            device = self._bus.get_proxy_object(
-                BLUEZ_SERVICE, self.device_path, introspection
-            ).get_interface(DEVICE_INTERFACE)
+            device = await self._device1_proxy()
             _LOGGER.debug("Calling Pair on %s", self.device_path)
             await device.call_pair()
             await self._set_trusted()
@@ -454,26 +464,68 @@ class BlueZPairSession:
 
     async def _set_trusted(self) -> None:
         """Set Device1.Trusted = true."""
-        from dbus_fast import Variant
+        from dbus_fast import Message, MessageType, Variant
+        from dbus_fast.errors import DBusError
 
-        assert self._bus is not None
-        assert self.device_path is not None
-        introspection = await self._bus.introspect(BLUEZ_SERVICE, self.device_path)
-        props = self._bus.get_proxy_object(
-            BLUEZ_SERVICE, self.device_path, introspection
-        ).get_interface(PROPERTIES_INTERFACE)
-        await props.call_set(DEVICE_INTERFACE, "Trusted", Variant("b", True))
+        device = await self._device1_proxy()
+        setter = getattr(device, "set_trusted", None)
+        if setter is not None:
+            await setter(True)
+        else:
+            # Device1 XML omitted Trusted; Properties.Set still works at runtime.
+            assert self._bus is not None
+            assert self.device_path is not None
+            reply = await self._bus.call(
+                Message(
+                    destination=BLUEZ_SERVICE,
+                    path=self.device_path,
+                    interface=PROPERTIES_INTERFACE,
+                    member="Set",
+                    signature="ssv",
+                    body=[DEVICE_INTERFACE, "Trusted", Variant("b", True)],
+                )
+            )
+            if reply.message_type == MessageType.ERROR:
+                raise DBusError._from_message(reply)
         _LOGGER.debug("Trusted %s", self.device_path)
 
-    async def _device_props(self) -> dict[str, Any]:
-        """Return Device1 properties for the resolved path."""
+    async def _device1_proxy(self) -> Any:
+        """Return an org.bluez.Device1 proxy for the resolved path."""
+        from dbus_fast.errors import InterfaceNotFoundError
+
         assert self._bus is not None
         assert self.device_path is not None
         introspection = await self._bus.introspect(BLUEZ_SERVICE, self.device_path)
-        props_iface = self._bus.get_proxy_object(
-            BLUEZ_SERVICE, self.device_path, introspection
-        ).get_interface(PROPERTIES_INTERFACE)
-        return await props_iface.call_get_all(DEVICE_INTERFACE)
+        try:
+            return self._bus.get_proxy_object(
+                BLUEZ_SERVICE, self.device_path, introspection
+            ).get_interface(DEVICE_INTERFACE)
+        except InterfaceNotFoundError as err:
+            raise DeviceNotFoundError(
+                f"BlueZ has no Device1 interface at {self.device_path}"
+            ) from err
+
+    async def _device1_props(self) -> dict[str, Any]:
+        """Return Device1 properties via ObjectManager.
+
+        Avoids ``org.freedesktop.DBus.Properties`` on the device proxy; BlueZ
+        Introspect XML often omits that interface even though Device1 exists.
+        """
+        assert self._bus is not None
+        assert self.device_path is not None
+        objects = await _get_managed_objects(self._bus)
+        ifaces = objects.get(self.device_path)
+        if not ifaces or DEVICE_INTERFACE not in ifaces:
+            resolved = await _find_device_path_on_bus(self._bus, self.address)
+            if resolved is None:
+                raise DeviceNotFoundError(
+                    f"BlueZ has no device object for {self.address}. "
+                    "Press User 1 or User 2 so the cuff advertises, then scan again."
+                )
+            self.device_path = resolved
+            objects = await _get_managed_objects(self._bus)
+            ifaces = objects.get(resolved) or {}
+        return ifaces.get(DEVICE_INTERFACE) or {}
 
     async def _find_device_path(self) -> str | None:
         """Find `/org/bluez/hciX/dev_…` for this address via ObjectManager."""
