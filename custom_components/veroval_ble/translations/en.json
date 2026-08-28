@@ -26,9 +26,13 @@
         "title": "Set up Veroval BPU26",
         "description": "Do you want to set up {name} (`{address}`)?"
       },
-      "pairing": {
-        "title": "Pair the cuff on the host",
-        "description": "The 6-digit PIN is OS Bluetooth pairing, not a Home Assistant prompt.\n\n1. Press **User 1** or **User 2** on the cuff so Bluetooth flashes (about 2 minutes). A new measurement is not required.\n2. Unpair the cuff from medi.connect and any phone. Only one client should hold the bond.\n3. On the Home Assistant host (SSH / Terminal add-on), run `bluetoothctl`, then `scan on`, `pair {address}`, enter the PIN shown on the cuff, and `trust {address}`.\n4. ESPHome Bluetooth Proxy cannot pair this cuff (no PIN UI) and is unsupported.\n\nIf advertising stops, press User 1 or User 2 again and retry `pair`."
+      "enter_pin": {
+        "title": "Enter the cuff PIN",
+        "description": "The cuff should now show a **6-digit PIN**. Enter it below.\n\nDevice: {name} (`{address}`)\n\nIf no PIN appears, press **User 1** or **User 2** so Bluetooth flashes and try setup again.",
+        "submit": "Pair",
+        "data": {
+          "pin": "6-digit PIN"
+        }
       },
       "user_slot": {
         "title": "Which user?",
@@ -39,17 +43,27 @@
       }
     },
     "progress": {
-      "scanning": "Press User 1 or User 2 on the cuff so Bluetooth flashes. Listening for BPU26 ({seconds} seconds)…"
+      "scanning": "Press User 1 or User 2 on the cuff so Bluetooth flashes. Listening for BPU26 ({seconds} seconds)…",
+      "connecting": "Connecting to {name}. Watch the cuff for a 6-digit PIN…",
+      "finishing": "Finishing pairing with {name}…"
     },
     "error": {
       "no_devices_found": "No BPU26 cuff was found. Press User 1 or User 2 so Bluetooth flashes, wait a few seconds, then submit again — or paste the Bluetooth address from bluetoothctl.",
-      "invalid_address": "Enter a Bluetooth address like AA:BB:CC:DD:EE:FF."
+      "invalid_address": "Enter a Bluetooth address like AA:BB:CC:DD:EE:FF.",
+      "invalid_pin": "Enter the 6-digit PIN shown on the cuff.",
+      "pairing_failed": "Pairing failed. Press User 1 or User 2 so Bluetooth flashes, then try again.",
+      "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again."
     },
     "abort": {
       "not_supported": "Device not supported",
       "no_devices_found": "No BPU26 cuff was found. Press User 1 or User 2 so Bluetooth flashes (~2 minutes), then try again.",
       "already_in_progress": "Configuration flow is already in progress",
-      "already_configured": "This cuff is already configured for both User 1 and User 2"
+      "already_configured": "This cuff is already configured for both User 1 and User 2",
+      "pairing_not_supported": "In-UI pairing requires a Bluetooth adapter on the Home Assistant OS host (Linux BlueZ).",
+      "proxy_not_supported": "This cuff was only seen via a Bluetooth proxy. Pairing needs the Home Assistant host adapter (built-in or USB). ESPHome Bluetooth Proxy cannot enter the cuff PIN.",
+      "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again.",
+      "device_not_found": "BlueZ does not know this cuff yet. Press User 1 or User 2 so Bluetooth flashes, then scan again from the host adapter.",
+      "pairing_failed": "Pairing failed. Press User 1 or User 2 so Bluetooth flashes, unpair medi.connect, and try again."
     }
   },
   "entity": {

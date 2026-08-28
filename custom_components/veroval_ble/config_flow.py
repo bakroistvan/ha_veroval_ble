@@ -13,6 +13,7 @@ from homeassistant.components.bluetooth import (
     BluetoothChange,
     BluetoothScanningMode,
     BluetoothServiceInfoBleak,
+    async_ble_device_from_address,
     async_discovered_service_info,
     async_register_callback,
 )
@@ -20,8 +21,21 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
 
+from .bluez_pair import (
+    AgentUnavailableError,
+    BlueZPairSession,
+    DeviceNotFoundError,
+    PairingError,
+    PairingFailedError,
+    PairingNotSupportedError,
+    ProxyNotSupportedError,
+    bluez_path_from_device,
+    is_bluez_pairing_supported,
+    is_local_bluez_device,
+)
 from .const import (
     CONF_CUFF_USER,
+    CONF_PIN,
     DOMAIN,
     LOCAL_NAME,
     MANUFACTURER_ID,
@@ -60,6 +74,11 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._address: str | None = None
         self._name: str | None = None
         self._scan_task: asyncio.Task[None] | None = None
+        self._pair_session: BlueZPairSession | None = None
+        self._pair_wait_task: asyncio.Task[str] | None = None
+        self._pair_finish_task: asyncio.Task[None] | None = None
+        self._pair_outcome: str | None = None
+        self._pair_error_reason: str | None = None
 
     def _configured_slots(self, address: str) -> set[int]:
         """Return cuff-user slots already set up for this BLE address."""
@@ -82,6 +101,33 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             for slot in (CUFF_USER_1, CUFF_USER_2)
             if slot not in configured
         }
+
+    def _resolve_local_device_path(self) -> str | None:
+        """Return a local BlueZ object path for the selected address, if any."""
+        assert self._address is not None
+        device = async_ble_device_from_address(self.hass, self._address, True)
+        if device is not None:
+            if is_local_bluez_device(device):
+                return bluez_path_from_device(device)
+            raise ProxyNotSupportedError()
+
+        discovery = self._discovery_info or self._discovered_devices.get(self._address)
+        if discovery is not None:
+            if is_local_bluez_device(discovery.device):
+                return bluez_path_from_device(discovery.device)
+            raise ProxyNotSupportedError()
+
+        # Typed address with no cached advertisement: ObjectManager may still find it.
+        return None
+
+    async def _async_close_pair_session(self) -> None:
+        """Tear down any in-flight BlueZ pairing session."""
+        session = self._pair_session
+        self._pair_session = None
+        self._pair_wait_task = None
+        self._pair_finish_task = None
+        if session is not None:
+            await session.close()
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
@@ -112,7 +158,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_bluetooth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm the discovered cuff, then show pairing instructions."""
+        """Confirm the discovered cuff, then start in-UI pairing."""
         assert self._address is not None
         if user_input is not None:
             return await self.async_step_pairing()
@@ -332,20 +378,201 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_pairing(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Show host pairing instructions. No GATT connect on submit."""
+        """Start host-adapter BlueZ pairing (or skip if already bonded)."""
         assert self._address is not None
-        _LOGGER.debug("Pairing reminder for %s", self._address)
-        if user_input is not None:
+        _LOGGER.debug("Starting UI pairing for %s", self._address)
+
+        if not is_bluez_pairing_supported():
+            return self.async_abort(reason="pairing_not_supported")
+
+        try:
+            device_path = self._resolve_local_device_path()
+        except ProxyNotSupportedError:
+            return self.async_abort(reason="proxy_not_supported")
+
+        await self._async_close_pair_session()
+        session = BlueZPairSession(self._address, device_path=device_path)
+        self._pair_session = session
+        try:
+            await session.open()
+        except AgentUnavailableError:
+            await self._async_close_pair_session()
+            return self.async_abort(reason="agent_unavailable")
+        except PairingNotSupportedError:
+            await self._async_close_pair_session()
+            return self.async_abort(reason="pairing_not_supported")
+        except DeviceNotFoundError:
+            await self._async_close_pair_session()
+            return self.async_abort(reason="device_not_found")
+        except ProxyNotSupportedError:
+            await self._async_close_pair_session()
+            return self.async_abort(reason="proxy_not_supported")
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Failed to open BlueZ pairing session")
+            await self._async_close_pair_session()
+            return self.async_abort(reason="pairing_failed")
+
+        if session.already_paired:
+            await self._async_close_pair_session()
+            _LOGGER.debug("Already paired; continuing to user slot")
             return await self.async_step_user_slot()
 
+        return await self.async_step_pair_wait()
+
+    async def _async_run_pair_wait(self) -> str:
+        """Background work for the connecting progress step."""
+        assert self._pair_session is not None
+        await self._pair_session.start_pair()
+        try:
+            return await self._pair_session.wait_for_passkey_or_done()
+        except PairingError as err:
+            self._pair_error_reason = err.reason
+            raise
+        except Exception as err:
+            self._pair_error_reason = "pairing_failed"
+            raise PairingFailedError(str(err)) from err
+
+    async def async_step_pair_wait(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Progress: connecting and waiting for the cuff to show a PIN."""
+        assert self._address is not None
+        if self._pair_wait_task is None:
+            self._pair_error_reason = None
+            self._pair_wait_task = self.hass.async_create_task(
+                self._async_run_pair_wait(),
+                f"{DOMAIN}_pair_wait",
+            )
+
+        if not self._pair_wait_task.done():
+            return self.async_show_progress(
+                step_id="pair_wait",
+                progress_action="connecting",
+                description_placeholders={
+                    "name": self._name or LOCAL_NAME,
+                    "address": self._address,
+                },
+                progress_task=self._pair_wait_task,
+            )
+
+        try:
+            self._pair_outcome = await self._pair_wait_task
+        except PairingError:
+            self._pair_outcome = "failed"
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("pair_wait failed")
+            self._pair_outcome = "failed"
+            self._pair_error_reason = "pairing_failed"
+        finally:
+            self._pair_wait_task = None
+        return self.async_show_progress_done(next_step_id="pair_wait_done")
+
+    async def async_step_pair_wait_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Route after connecting: PIN form, user slot, or error."""
+        outcome = self._pair_outcome
+        if outcome == "need_pin":
+            return await self.async_step_enter_pin()
+        if outcome in {"done", "already_paired"}:
+            await self._async_close_pair_session()
+            return await self.async_step_user_slot()
+        reason = self._pair_error_reason or "pairing_failed"
+        await self._async_close_pair_session()
+        return self.async_abort(reason=reason)
+
+    async def async_step_enter_pin(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Collect the 6-digit PIN shown on the cuff."""
+        assert self._address is not None
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            pin = str(user_input.get(CONF_PIN) or "").strip()
+            if not pin.isdigit() or not 4 <= len(pin) <= 6:
+                errors[CONF_PIN] = "invalid_pin"
+            elif self._pair_session is None:
+                return self.async_abort(reason="pairing_failed")
+            else:
+                try:
+                    self._pair_session.provide_passkey(pin)
+                except ValueError:
+                    errors[CONF_PIN] = "invalid_pin"
+                except PairingError:
+                    await self._async_close_pair_session()
+                    return self.async_abort(reason="pairing_failed")
+                else:
+                    return await self.async_step_pair_finish()
+
         return self.async_show_form(
-            step_id="pairing",
-            data_schema=vol.Schema({}),
+            step_id="enter_pin",
+            data_schema=vol.Schema({vol.Required(CONF_PIN): str}),
+            errors=errors,
             description_placeholders={
                 "name": self._name or LOCAL_NAME,
                 "address": self._address,
             },
         )
+
+    async def _async_run_pair_finish(self) -> None:
+        """Background work after the PIN was submitted."""
+        assert self._pair_session is not None
+        try:
+            await self._pair_session.wait_finished()
+        except PairingError as err:
+            self._pair_error_reason = err.reason
+            raise
+        except Exception as err:
+            self._pair_error_reason = "pairing_failed"
+            raise PairingFailedError(str(err)) from err
+        finally:
+            await self._async_close_pair_session()
+
+    async def async_step_pair_finish(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Progress: finish bonding after the PIN was entered."""
+        assert self._address is not None
+        if self._pair_finish_task is None:
+            self._pair_error_reason = None
+            self._pair_finish_task = self.hass.async_create_task(
+                self._async_run_pair_finish(),
+                f"{DOMAIN}_pair_finish",
+            )
+
+        if not self._pair_finish_task.done():
+            return self.async_show_progress(
+                step_id="pair_finish",
+                progress_action="finishing",
+                description_placeholders={
+                    "name": self._name or LOCAL_NAME,
+                    "address": self._address,
+                },
+                progress_task=self._pair_finish_task,
+            )
+
+        try:
+            await self._pair_finish_task
+            self._pair_outcome = "done"
+        except PairingError:
+            self._pair_outcome = "failed"
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("pair_finish failed")
+            self._pair_outcome = "failed"
+            self._pair_error_reason = "pairing_failed"
+        finally:
+            self._pair_finish_task = None
+        return self.async_show_progress_done(next_step_id="pair_finish_done")
+
+    async def async_step_pair_finish_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Route after bonding finishes."""
+        if self._pair_outcome == "done":
+            return await self.async_step_user_slot()
+        reason = self._pair_error_reason or "pairing_failed"
+        return self.async_abort(reason=reason)
 
     async def async_step_user_slot(
         self, user_input: dict[str, Any] | None = None

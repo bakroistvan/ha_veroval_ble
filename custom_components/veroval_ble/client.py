@@ -29,10 +29,9 @@ from .parser import (
 _LOGGER = logging.getLogger(__name__)
 
 AUTH_HINT = (
-    "Pair the cuff on this machine while User 1 or User 2 is advertising. "
-    "On Windows: Settings → Bluetooth → Add device. "
-    "On Linux/HAOS: bluetoothctl pair/trust. "
-    "Unpair medi.connect and other phones first."
+    "Pair the cuff again from Home Assistant setup (host Bluetooth adapter). "
+    "Unpair medi.connect and other phones first. "
+    "ESPHome Bluetooth Proxy cannot enter the cuff PIN."
 )
 
 

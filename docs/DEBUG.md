@@ -52,10 +52,16 @@ custom_components.veroval_ble: debug
 |-------|----------------|
 | **DEBUG** | Advertisement seen; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); `stop_notify` and disconnect; config-flow steps including user choice |
 | **INFO** | Config entry setup (address and User 1/2); successful latest reading for that slot (systolic / diastolic / pulse / time, no raw hex) |
-| **WARNING** | Connect timeout, missing Blood Pressure Measurement characteristic, parse failure, auth/pairing errors (pair on the host with `bluetoothctl`) |
+| **WARNING** | Connect timeout, missing Blood Pressure Measurement characteristic, parse failure, auth/pairing errors (re-run setup on the host adapter to re-pair) |
 | **ERROR** | Unexpected exceptions around a poll |
 
 Advertisements are not logged at INFO (the cuff can advertise for ~2 minutes). Health hex stays at DEBUG only.
+
+## Pairing (Home Assistant OS)
+
+Setup pairs on the **host Bluetooth adapter** and asks for the cuff’s 6-digit PIN in the UI. Close any open `bluetoothctl` session first so the integration can register the BlueZ agent.
+
+ESPHome Bluetooth Proxy cannot enter the PIN — use the HAOS built-in or USB adapter for pairing.
 
 ## Hardware-in-the-loop (no Home Assistant)
 

@@ -29,41 +29,37 @@ A new measurement is **not** required to pair or sync. If the window ends, press
 
 Unpair the cuff from **medi.connect** (and do not leave a phone connected). Only one BLE client should hold the bond.
 
-## Pair once on the host
+## Pair once (in the Home Assistant UI)
 
-The 6-digit PIN is OS Bluetooth pairing (SMP Passkey Entry). Home Assistant never prompts for it. Pair **once** on the HA host; later presses reuse the bond.
+The cuff shows a **6-digit PIN** during Bluetooth pairing (SMP Passkey Entry). Setup collects that PIN in the Home Assistant UI on the **host adapter** (built-in or USB). Later presses reuse the bond — no PIN again.
 
-On **HAOS**, use the Terminal / SSH add-on:
+1. Unpair the cuff from **medi.connect** and any phone.
+2. Press **User 1** or **User 2** so Bluetooth flashes.
+3. Add **Veroval Blood Pressure BLE** (or open the discovery card).
+4. When prompted, enter the **6-digit PIN** shown on the cuff.
+5. Choose **User 1** or **User 2** for this config entry.
+
+**ESPHome Bluetooth Proxy cannot pair this cuff** (no way to enter the PIN on the proxy radio). Use the HAOS host adapter.
+
+If the UI says the pairing agent is unavailable, close any open `bluetoothctl` session and retry. As a last resort on HAOS:
 
 ```text
 bluetoothctl
 scan on
-```
-
-Find `BPU26`, then (use the cuff’s address):
-
-```text
 pair AA:BB:CC:DD:EE:FF
-```
-
-Enter the **6-digit PIN** shown on the cuff. Then:
-
-```text
 trust AA:BB:CC:DD:EE:FF
-scan off
-exit
 ```
 
-If advertising stops before pairing finishes, press **User 1** or **User 2** again and retry `pair`.
+Then run setup again (already-paired cuffs skip the PIN step).
 
 ## Home Assistant setup
 
 1. Press **User 1** or **User 2** so the cuff advertises.
-2. **Settings → Devices & services** — Home Assistant should discover **Veroval Blood Pressure BLE**.
-3. Follow the pairing reminder (host `bluetoothctl` + PIN, as above).
+2. **Settings → Devices & services** — Home Assistant should discover **Veroval Blood Pressure BLE**, or add it manually and scan.
+3. Enter the cuff PIN when the UI asks (host adapter only).
 4. Select **User 1** or **User 2** — the slot whose latest reading this config entry will publish.
 
-Sensors belong to **that slot only**. A second person can add the same cuff again and choose the other user.
+Sensors belong to **that slot only**. A second person can add the same cuff again and choose the other user (already paired — no PIN again).
 
 Each sync **drains** the BLE history dump, then publishes the record with the **newest timestamp for the selected slot** — not the first packet.
 

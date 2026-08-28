@@ -5,6 +5,7 @@ from __future__ import annotations
 DOMAIN = "veroval_ble"
 
 CONF_CUFF_USER = "cuff_user"
+CONF_PIN = "pin"
 
 CHARACTERISTIC_BLOOD_PRESSURE = "00002a35-0000-1000-8000-00805f9b34fb"
 MANUFACTURER_ID = 2751  # 0x0ABF PAUL HARTMANN AG

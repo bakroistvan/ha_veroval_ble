@@ -1,0 +1,432 @@
+"""BlueZ D-Bus pairing helper for Veroval BPU26 passkey entry (HAOS host adapter)."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
+
+BLUEZ_SERVICE = "org.bluez"
+AGENT_INTERFACE = "org.bluez.Agent1"
+AGENT_MANAGER_INTERFACE = "org.bluez.AgentManager1"
+DEVICE_INTERFACE = "org.bluez.Device1"
+PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
+OBJECT_MANAGER_INTERFACE = "org.freedesktop.DBus.ObjectManager"
+AGENT_MANAGER_PATH = "/org/bluez"
+AGENT_PATH = "/org/homeassistant/veroval_ble/agent"
+AGENT_CAPABILITY = "KeyboardDisplay"
+
+PAIR_TIMEOUT_SECONDS = 120.0
+
+
+class PairingError(Exception):
+    """Pairing failure with a config-flow abort/error reason."""
+
+    def __init__(self, reason: str, message: str = "") -> None:
+        super().__init__(message or reason)
+        self.reason = reason
+
+
+class AgentUnavailableError(PairingError):
+    """BlueZ agent could not be registered (another agent may own the default)."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__("agent_unavailable", message)
+
+
+class PairingNotSupportedError(PairingError):
+    """Host cannot register a BlueZ agent (not Linux / no dbus-fast)."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__("pairing_not_supported", message)
+
+
+class ProxyNotSupportedError(PairingError):
+    """Device is only reachable via a Bluetooth proxy, not the host adapter."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__("proxy_not_supported", message)
+
+
+class DeviceNotFoundError(PairingError):
+    """BlueZ does not know this address yet."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__("device_not_found", message)
+
+
+class PairingFailedError(PairingError):
+    """Pair() failed after the agent was registered."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__("pairing_failed", message)
+
+
+def is_bluez_pairing_supported() -> bool:
+    """Return True when this host can attempt in-UI BlueZ passkey pairing."""
+    if sys.platform != "linux":
+        return False
+    try:
+        import dbus_fast  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def is_local_bluez_device(device: Any) -> bool:
+    """Return True if a Bleak BLEDevice looks like a local BlueZ object."""
+    details = getattr(device, "details", None) or {}
+    if not isinstance(details, dict):
+        return False
+    path = details.get("path")
+    return isinstance(path, str) and path.startswith("/org/bluez/")
+
+
+def bluez_path_from_device(device: Any) -> str | None:
+    """Return the BlueZ object path from a Bleak BLEDevice, if present."""
+    if not is_local_bluez_device(device):
+        return None
+    details = device.details
+    assert isinstance(details, dict)
+    path = details.get("path")
+    assert isinstance(path, str)
+    return path
+
+
+def _build_passkey_agent(session: BlueZPairSession) -> Any:
+    """Build an org.bluez.Agent1 ServiceInterface bound to *session*."""
+    from dbus_fast import DBusError
+    from dbus_fast.service import ServiceInterface, dbus_method
+
+    # dbus-fast reads parameter annotations as D-Bus signature strings.
+    # Build the class without postponed evaluation of those signatures.
+    namespace: dict[str, Any] = {
+        "ServiceInterface": ServiceInterface,
+        "dbus_method": dbus_method,
+        "DBusError": DBusError,
+        "_LOGGER": _LOGGER,
+        "session": session,
+    }
+    exec(
+        """
+class VerovalPasskeyAgent(ServiceInterface):
+    def __init__(self):
+        super().__init__("org.bluez.Agent1")
+        self._session = session
+
+    @dbus_method()
+    def Release(self) -> None:
+        _LOGGER.debug("BlueZ agent Release")
+
+    @dbus_method()
+    async def RequestPinCode(self, device: 'o') -> 's':
+        pin = await self._session._await_passkey(device)
+        return f"{pin:06d}"
+
+    @dbus_method()
+    def DisplayPinCode(self, device: 'o', pincode: 's') -> None:
+        _LOGGER.debug("DisplayPinCode %s %s", device, pincode)
+
+    @dbus_method()
+    async def RequestPasskey(self, device: 'o') -> 'u':
+        return await self._session._await_passkey(device)
+
+    @dbus_method()
+    def DisplayPasskey(self, device: 'o', passkey: 'u', entered: 'q') -> None:
+        _LOGGER.debug("DisplayPasskey %s %06u entered=%s", device, passkey, entered)
+
+    @dbus_method()
+    def RequestConfirmation(self, device: 'o', passkey: 'u') -> None:
+        _LOGGER.warning(
+            "Unexpected RequestConfirmation for %s (%06u); rejecting",
+            device,
+            passkey,
+        )
+        raise DBusError(
+            "org.bluez.Error.Rejected",
+            "Numeric comparison is not supported for this cuff",
+        )
+
+    @dbus_method()
+    def RequestAuthorization(self, device: 'o') -> None:
+        _LOGGER.debug("RequestAuthorization %s", device)
+
+    @dbus_method()
+    def AuthorizeService(self, device: 'o', uuid: 's') -> None:
+        _LOGGER.debug("AuthorizeService %s %s", device, uuid)
+
+    @dbus_method()
+    def Cancel(self) -> None:
+        _LOGGER.debug("BlueZ agent Cancel")
+        self._session._cancel_passkey()
+""",
+        namespace,
+    )
+    return namespace["VerovalPasskeyAgent"]()
+
+
+class BlueZPairSession:
+    """Register a BlueZ agent, Pair a cuff, collect the PIN from the UI."""
+
+    def __init__(self, address: str, device_path: str | None = None) -> None:
+        """Initialize an idle pairing session for *address*."""
+        self.address = address.lower()
+        self.device_path = device_path
+        self.passkey_requested = asyncio.Event()
+        self._passkey_future: asyncio.Future[int] | None = None
+        self._pair_task: asyncio.Task[None] | None = None
+        self._bus: Any = None
+        self._agent_registered = False
+        self._closed = False
+        self._pair_error: BaseException | None = None
+        self.already_paired = False
+
+    async def _await_passkey(self, device: str) -> int:
+        """Block the BlueZ agent until the config flow supplies a passkey."""
+        from dbus_fast import DBusError
+
+        _LOGGER.debug("RequestPasskey for %s", device)
+        loop = asyncio.get_running_loop()
+        if self._passkey_future is not None and not self._passkey_future.done():
+            self._passkey_future.cancel()
+        self._passkey_future = loop.create_future()
+        self.passkey_requested.set()
+        try:
+            return await self._passkey_future
+        except asyncio.CancelledError as err:
+            raise DBusError(
+                "org.bluez.Error.Canceled", "Passkey entry cancelled"
+            ) from err
+
+    def _cancel_passkey(self) -> None:
+        """Cancel a pending passkey future (BlueZ Cancel)."""
+        if self._passkey_future is not None and not self._passkey_future.done():
+            self._passkey_future.cancel()
+
+    def provide_passkey(self, pin: str) -> None:
+        """Complete RequestPasskey with the 6-digit PIN from the UI."""
+        digits = pin.strip()
+        if not digits.isdigit() or not 1 <= len(digits) <= 6:
+            raise ValueError("invalid_pin")
+        value = int(digits)
+        if value > 999999:
+            raise ValueError("invalid_pin")
+        if self._passkey_future is None or self._passkey_future.done():
+            raise PairingFailedError("No passkey request is pending")
+        self._passkey_future.set_result(value)
+
+    async def open(self) -> None:
+        """Connect to the system bus, resolve the device, register the agent."""
+        if not is_bluez_pairing_supported():
+            raise PairingNotSupportedError(
+                "In-UI pairing requires Linux BlueZ (Home Assistant OS host adapter)"
+            )
+
+        from dbus_fast import Variant
+        from dbus_fast.aio import MessageBus
+        from dbus_fast.constants import BusType
+
+        self._bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        if self.device_path is None:
+            self.device_path = await self._find_device_path()
+        if self.device_path is None:
+            raise DeviceNotFoundError(
+                f"BlueZ has no device object for {self.address}. "
+                "Press User 1 or User 2 so the cuff advertises, then scan again."
+            )
+
+        props = await self._device_props()
+        if bool(props.get("Paired", Variant("b", False)).value):
+            _LOGGER.debug("%s is already paired", self.address)
+            self.already_paired = True
+            await self._set_trusted()
+            return
+
+        agent = _build_passkey_agent(self)
+        self._bus.export(AGENT_PATH, agent)
+        introspection = await self._bus.introspect(BLUEZ_SERVICE, AGENT_MANAGER_PATH)
+        manager = self._bus.get_proxy_object(
+            BLUEZ_SERVICE, AGENT_MANAGER_PATH, introspection
+        ).get_interface(AGENT_MANAGER_INTERFACE)
+        try:
+            await manager.call_register_agent(AGENT_PATH, AGENT_CAPABILITY)
+            await manager.call_request_default_agent(AGENT_PATH)
+        except Exception as err:
+            try:
+                self._bus.unexport(AGENT_PATH)
+            except Exception:  # noqa: BLE001
+                pass
+            raise AgentUnavailableError(
+                "Could not register the Bluetooth pairing agent. "
+                "Close bluetoothctl if it is open, then try again."
+            ) from err
+        self._agent_registered = True
+        _LOGGER.debug("Registered BlueZ agent at %s", AGENT_PATH)
+
+    async def start_pair(self) -> None:
+        """Begin Device1.Pair in the background (agent must already be open)."""
+        if self.already_paired:
+            return
+        assert self.device_path is not None
+        assert self._bus is not None
+        self.passkey_requested.clear()
+        self._pair_task = asyncio.create_task(
+            self._pair_and_trust(), name=f"veroval_ble_pair_{self.address}"
+        )
+
+    async def wait_for_passkey_or_done(self) -> str:
+        """Wait until BlueZ asks for a PIN, or Pair finishes without one.
+
+        Returns ``need_pin``, ``already_paired``, or ``done``.
+        """
+        if self.already_paired:
+            return "already_paired"
+        assert self._pair_task is not None
+
+        passkey_waiter = asyncio.create_task(
+            self.passkey_requested.wait(), name="veroval_ble_passkey_wait"
+        )
+        done, _pending = await asyncio.wait(
+            {self._pair_task, passkey_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=PAIR_TIMEOUT_SECONDS,
+        )
+
+        if not done:
+            passkey_waiter.cancel()
+            self._cancel_passkey()
+            self._pair_task.cancel()
+            raise PairingFailedError("Pairing timed out waiting for the cuff PIN")
+
+        if passkey_waiter in done and self.passkey_requested.is_set():
+            passkey_waiter.cancel()
+            if self._pair_task.done():
+                exc = self._pair_task.exception()
+                if exc is not None:
+                    raise PairingFailedError(str(exc)) from exc
+            return "need_pin"
+
+        passkey_waiter.cancel()
+        await self._pair_task
+        if self._pair_error is not None:
+            raise PairingFailedError(str(self._pair_error)) from self._pair_error
+        return "done"
+
+    async def wait_finished(self) -> None:
+        """Wait for Pair() to finish after the passkey was provided."""
+        if self.already_paired:
+            return
+        assert self._pair_task is not None
+        try:
+            await asyncio.wait_for(self._pair_task, timeout=PAIR_TIMEOUT_SECONDS)
+        except TimeoutError as err:
+            self._cancel_passkey()
+            self._pair_task.cancel()
+            raise PairingFailedError("Pairing timed out after PIN entry") from err
+        if self._pair_error is not None:
+            raise PairingFailedError(str(self._pair_error)) from self._pair_error
+
+    async def close(self) -> None:
+        """Unregister the agent and disconnect from D-Bus."""
+        if self._closed:
+            return
+        self._closed = True
+        self._cancel_passkey()
+        if self._pair_task is not None and not self._pair_task.done():
+            self._pair_task.cancel()
+            try:
+                await self._pair_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+        if self._bus is not None and self._agent_registered:
+            try:
+                introspection = await self._bus.introspect(
+                    BLUEZ_SERVICE, AGENT_MANAGER_PATH
+                )
+                manager = self._bus.get_proxy_object(
+                    BLUEZ_SERVICE, AGENT_MANAGER_PATH, introspection
+                ).get_interface(AGENT_MANAGER_INTERFACE)
+                await manager.call_unregister_agent(AGENT_PATH)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("UnregisterAgent failed: %s", err)
+            try:
+                self._bus.unexport(AGENT_PATH)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("unexport agent failed: %s", err)
+            self._agent_registered = False
+        if self._bus is not None:
+            try:
+                self._bus.disconnect()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("D-Bus disconnect failed: %s", err)
+            self._bus = None
+
+    async def _pair_and_trust(self) -> None:
+        """Call Device1.Pair, then set Trusted and Disconnect."""
+        assert self._bus is not None
+        assert self.device_path is not None
+        try:
+            introspection = await self._bus.introspect(BLUEZ_SERVICE, self.device_path)
+            device = self._bus.get_proxy_object(
+                BLUEZ_SERVICE, self.device_path, introspection
+            ).get_interface(DEVICE_INTERFACE)
+            _LOGGER.debug("Calling Pair on %s", self.device_path)
+            await device.call_pair()
+            await self._set_trusted()
+            try:
+                await device.call_disconnect()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Disconnect after pair: %s", err)
+            _LOGGER.info("Paired and trusted %s", self.address)
+        except Exception as err:
+            self._pair_error = err
+            _LOGGER.warning("Pair failed for %s: %s", self.address, err)
+            raise
+
+    async def _set_trusted(self) -> None:
+        """Set Device1.Trusted = true."""
+        from dbus_fast import Variant
+
+        assert self._bus is not None
+        assert self.device_path is not None
+        introspection = await self._bus.introspect(BLUEZ_SERVICE, self.device_path)
+        props = self._bus.get_proxy_object(
+            BLUEZ_SERVICE, self.device_path, introspection
+        ).get_interface(PROPERTIES_INTERFACE)
+        await props.call_set(DEVICE_INTERFACE, "Trusted", Variant("b", True))
+        _LOGGER.debug("Trusted %s", self.device_path)
+
+    async def _device_props(self) -> dict[str, Any]:
+        """Return Device1 properties for the resolved path."""
+        assert self._bus is not None
+        assert self.device_path is not None
+        introspection = await self._bus.introspect(BLUEZ_SERVICE, self.device_path)
+        props_iface = self._bus.get_proxy_object(
+            BLUEZ_SERVICE, self.device_path, introspection
+        ).get_interface(PROPERTIES_INTERFACE)
+        return await props_iface.call_get_all(DEVICE_INTERFACE)
+
+    async def _find_device_path(self) -> str | None:
+        """Find `/org/bluez/hciX/dev_…` for this address via ObjectManager."""
+        assert self._bus is not None
+        introspection = await self._bus.introspect(BLUEZ_SERVICE, "/")
+        manager = self._bus.get_proxy_object(
+            BLUEZ_SERVICE, "/", introspection
+        ).get_interface(OBJECT_MANAGER_INTERFACE)
+        objects = await manager.call_get_managed_objects()
+        target = self.address.lower()
+        for path, interfaces in objects.items():
+            device = interfaces.get(DEVICE_INTERFACE)
+            if not device:
+                continue
+            address_variant = device.get("Address")
+            if address_variant is None:
+                continue
+            if str(address_variant.value).lower() == target:
+                return str(path)
+        return None
