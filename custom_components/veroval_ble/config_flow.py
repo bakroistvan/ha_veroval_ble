@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.components.bluetooth import (
+    BluetoothChange,
+    BluetoothScanningMode,
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
+    async_register_callback,
 )
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.core import callback
 
-from .const import CONF_CUFF_USER, DOMAIN, LOCAL_NAME, MANUFACTURER_ID
+from .const import (
+    CONF_CUFF_USER,
+    DOMAIN,
+    LOCAL_NAME,
+    MANUFACTURER_ID,
+    SCAN_TIMEOUT_SECONDS,
+)
 from .parser import CUFF_USER_1, CUFF_USER_2
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,6 +40,14 @@ def _is_bpu26(service_info: BluetoothServiceInfoBleak) -> bool:
     return MANUFACTURER_ID in service_info.manufacturer_data
 
 
+def _normalize_address(value: str) -> str | None:
+    """Return a lowercase colon-separated MAC, or None if invalid."""
+    compact = value.strip().replace("-", "").replace(":", "").replace(" ", "").lower()
+    if len(compact) != 12 or any(c not in "0123456789abcdef" for c in compact):
+        return None
+    return ":".join(compact[i : i + 2] for i in range(0, 12, 2))
+
+
 class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Veroval BLE."""
 
@@ -39,6 +59,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
         self._address: str | None = None
         self._name: str | None = None
+        self._scan_task: asyncio.Task[None] | None = None
 
     def _configured_slots(self, address: str) -> set[int]:
         """Return cuff-user slots already set up for this BLE address."""
@@ -106,25 +127,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders=placeholders,
         )
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """List discovered BPU26 advertisements for manual setup."""
-        if user_input is not None:
-            address = str(user_input[CONF_ADDRESS]).lower()
-            discovery = self._discovered_devices[address]
-            self._discovery_info = discovery
-            self._address = address
-            self._name = discovery.name or LOCAL_NAME
-            await self.async_set_unique_id(address, raise_on_progress=False)
-            _LOGGER.debug("User picked %s (%s)", self._name, address)
-            return await self.async_step_pairing()
-
-        current_full = {
-            entry.unique_id
-            for entry in self._async_current_entries()
-            if entry.unique_id
-        }
+    def _collect_discovered(self) -> None:
+        """Refresh the cache of BPU26 advertisements still in the scanner."""
         for discovery_info in async_discovered_service_info(self.hass, False):
             if not _is_bpu26(discovery_info):
                 continue
@@ -135,11 +139,14 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             self._discovered_devices[address] = discovery_info
 
-        if not self._discovered_devices:
-            _LOGGER.debug("User setup: no BPU26 advertisements found")
-            return self.async_abort(reason="no_devices_found")
-
-        titles = {
+    def _discovered_titles(self) -> dict[str, str]:
+        """Return address → label for cuffs that still have a free user slot."""
+        current_full = {
+            entry.unique_id
+            for entry in self._async_current_entries()
+            if entry.unique_id
+        }
+        return {
             address: f"{info.name or LOCAL_NAME} ({address})"
             for address, info in self._discovered_devices.items()
             if not (
@@ -147,14 +154,179 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
                 and f"{address}_{CUFF_USER_2}" in current_full
             )
         }
+
+    async def _async_choose_address(self, address: str) -> ConfigFlowResult:
+        """Continue setup for a discovered or typed BLE address."""
+        discovery = self._discovered_devices.get(address)
+        self._discovery_info = discovery
+        self._address = address
+        self._name = (discovery.name if discovery else None) or LOCAL_NAME
+        await self.async_set_unique_id(address, raise_on_progress=False)
+        if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+            return self.async_abort(reason="already_configured")
+        _LOGGER.debug("User picked %s (%s)", self._name, address)
+        return await self.async_step_pairing()
+
+    async def _async_next_after_scan(self) -> ConfigFlowResult:
+        """Picker, pairing, or the Scan again screen after a timed scan."""
+        self._collect_discovered()
+        titles = self._discovered_titles()
         if not titles:
+            if self._discovered_devices:
+                return self.async_abort(reason="already_configured")
+            _LOGGER.debug("Scan timed out with no BPU26 advertisements")
+            return await self.async_step_not_found()
+        if len(titles) == 1:
+            return await self._async_choose_address(next(iter(titles)))
+        return await self.async_step_pick_device()
+
+    async def _async_scan_for_cuffs(self) -> None:
+        """Listen for BPU26 advertisements until one arrives or time runs out."""
+        found = asyncio.Event()
+
+        @callback
+        def _on_advertisement(
+            service_info: BluetoothServiceInfoBleak, _change: BluetoothChange
+        ) -> None:
+            if not _is_bpu26(service_info):
+                return
+            address = service_info.address.lower()
+            if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+                return
+            self._discovered_devices[address] = service_info
+            found.set()
+
+        unsubscribers = [
+            async_register_callback(
+                self.hass,
+                _on_advertisement,
+                {"local_name": LOCAL_NAME},
+                BluetoothScanningMode.ACTIVE,
+            ),
+            async_register_callback(
+                self.hass,
+                _on_advertisement,
+                {"manufacturer_id": MANUFACTURER_ID},
+                BluetoothScanningMode.ACTIVE,
+            ),
+        ]
+        try:
+            self._collect_discovered()
+            if self._discovered_devices:
+                self.async_update_progress(1.0)
+                return
+            started = time.monotonic()
+            while True:
+                elapsed = time.monotonic() - started
+                if elapsed >= SCAN_TIMEOUT_SECONDS or found.is_set():
+                    break
+                self.async_update_progress(elapsed / SCAN_TIMEOUT_SECONDS)
+                remaining = SCAN_TIMEOUT_SECONDS - elapsed
+                try:
+                    await asyncio.wait_for(found.wait(), timeout=min(1.0, remaining))
+                    break
+                except TimeoutError:
+                    continue
+            self._collect_discovered()
+        finally:
+            self.async_update_progress(1.0)
+            for unsub in unsubscribers:
+                unsub()
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show wake-cuff instructions, then start a timed scan."""
+        self._collect_discovered()
+        titles = self._discovered_titles()
+        if titles:
+            if len(titles) == 1:
+                return await self._async_choose_address(next(iter(titles)))
+            return await self.async_step_pick_device()
+        if self._discovered_devices:
             return self.async_abort(reason="already_configured")
 
+        if user_input is None:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=vol.Schema({}),
+                description_placeholders={
+                    "seconds": str(SCAN_TIMEOUT_SECONDS),
+                },
+            )
+        return await self.async_step_scan()
+
+    async def async_step_scan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show a progress bar while listening for BPU26 advertisements."""
+        if self._scan_task is None:
+            self._scan_task = self.hass.async_create_task(
+                self._async_scan_for_cuffs(),
+                f"{DOMAIN}_scan",
+            )
+
+        if not self._scan_task.done():
+            return self.async_show_progress(
+                step_id="scan",
+                progress_action="scanning",
+                description_placeholders={"seconds": str(SCAN_TIMEOUT_SECONDS)},
+                progress_task=self._scan_task,
+            )
+
+        try:
+            await self._scan_task
+        finally:
+            self._scan_task = None
+        return self.async_show_progress_done(next_step_id="scan_done")
+
+    async def async_step_scan_done(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Continue after the timed scan finishes or finds a cuff."""
+        return await self._async_next_after_scan()
+
+    async def async_step_pick_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Let the user pick among several discovered cuffs."""
+        if user_input is not None:
+            return await self._async_choose_address(
+                str(user_input[CONF_ADDRESS]).lower()
+            )
+        titles = self._discovered_titles()
+        if not titles:
+            return await self.async_step_not_found()
         return self.async_show_form(
-            step_id="user",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_ADDRESS): vol.In(titles)}
-            ),
+            step_id="pick_device",
+            data_schema=vol.Schema({vol.Required(CONF_ADDRESS): vol.In(titles)}),
+        )
+
+    async def async_step_not_found(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """After the scan timeout: Scan again, or paste a bluetoothctl address."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            typed = str(user_input.get(CONF_ADDRESS) or "").strip()
+            if typed:
+                address = typed.lower()
+                if address not in self._discovered_devices:
+                    normalized = _normalize_address(typed)
+                    if normalized is None:
+                        errors[CONF_ADDRESS] = "invalid_address"
+                    else:
+                        address = normalized
+                if CONF_ADDRESS not in errors:
+                    return await self._async_choose_address(address)
+            else:
+                return await self.async_step_scan()
+
+        return self.async_show_form(
+            step_id="not_found",
+            data_schema=vol.Schema({vol.Optional(CONF_ADDRESS): str}),
+            errors=errors,
+            description_placeholders={"seconds": str(SCAN_TIMEOUT_SECONDS)},
         )
 
     async def async_step_pairing(
