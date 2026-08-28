@@ -13,6 +13,7 @@ BLUEZ_SERVICE = "org.bluez"
 AGENT_INTERFACE = "org.bluez.Agent1"
 AGENT_MANAGER_INTERFACE = "org.bluez.AgentManager1"
 DEVICE_INTERFACE = "org.bluez.Device1"
+ADAPTER_INTERFACE = "org.bluez.Adapter1"
 PROPERTIES_INTERFACE = "org.freedesktop.DBus.Properties"
 OBJECT_MANAGER_INTERFACE = "org.freedesktop.DBus.ObjectManager"
 AGENT_MANAGER_PATH = "/org/bluez"
@@ -94,6 +95,69 @@ def bluez_path_from_device(device: Any) -> str | None:
     path = details.get("path")
     assert isinstance(path, str)
     return path
+
+
+def _adapter_path_for_device(device_path: str) -> str:
+    """Return `/org/bluez/hciX` for a device path `/org/bluez/hciX/dev_…`."""
+    return device_path.rsplit("/", 1)[0]
+
+
+async def _find_device_path_on_bus(bus: Any, address: str) -> str | None:
+    """Find `/org/bluez/hciX/dev_…` for *address* via ObjectManager."""
+    introspection = await bus.introspect(BLUEZ_SERVICE, "/")
+    manager = bus.get_proxy_object(
+        BLUEZ_SERVICE, "/", introspection
+    ).get_interface(OBJECT_MANAGER_INTERFACE)
+    objects = await manager.call_get_managed_objects()
+    target = address.lower()
+    for path, interfaces in objects.items():
+        device = interfaces.get(DEVICE_INTERFACE)
+        if not device:
+            continue
+        address_variant = device.get("Address")
+        if address_variant is None:
+            continue
+        if str(address_variant.value).lower() == target:
+            return str(path)
+    return None
+
+
+async def async_unpair_address(address: str) -> None:
+    """Remove the BlueZ bond for *address* (Adapter1.RemoveDevice).
+
+    Never raises: config-entry delete must succeed even if BlueZ remove fails.
+    """
+    if not is_bluez_pairing_supported():
+        _LOGGER.debug(
+            "Skipping BlueZ unpair for %s (not Linux / no dbus-fast)", address
+        )
+        return
+
+    from dbus_fast.aio import MessageBus
+    from dbus_fast.constants import BusType
+
+    bus = None
+    try:
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        device_path = await _find_device_path_on_bus(bus, address)
+        if device_path is None:
+            _LOGGER.debug("BlueZ has no device for %s; already unpaired", address)
+            return
+        adapter_path = _adapter_path_for_device(device_path)
+        introspection = await bus.introspect(BLUEZ_SERVICE, adapter_path)
+        adapter = bus.get_proxy_object(
+            BLUEZ_SERVICE, adapter_path, introspection
+        ).get_interface(ADAPTER_INTERFACE)
+        await adapter.call_remove_device(device_path)
+        _LOGGER.info("Removed BlueZ bond for %s (%s)", address, device_path)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Failed to unpair %s from BlueZ: %s", address, err)
+    finally:
+        if bus is not None:
+            try:
+                bus.disconnect()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("D-Bus disconnect after unpair failed: %s", err)
 
 
 def _build_passkey_agent(session: BlueZPairSession) -> Any:
@@ -414,19 +478,4 @@ class BlueZPairSession:
     async def _find_device_path(self) -> str | None:
         """Find `/org/bluez/hciX/dev_…` for this address via ObjectManager."""
         assert self._bus is not None
-        introspection = await self._bus.introspect(BLUEZ_SERVICE, "/")
-        manager = self._bus.get_proxy_object(
-            BLUEZ_SERVICE, "/", introspection
-        ).get_interface(OBJECT_MANAGER_INTERFACE)
-        objects = await manager.call_get_managed_objects()
-        target = self.address.lower()
-        for path, interfaces in objects.items():
-            device = interfaces.get(DEVICE_INTERFACE)
-            if not device:
-                continue
-            address_variant = device.get("Address")
-            if address_variant is None:
-                continue
-            if str(address_variant.value).lower() == target:
-                return str(path)
-        return None
+        return await _find_device_path_on_bus(self._bus, self.address)

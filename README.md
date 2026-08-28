@@ -63,6 +63,8 @@ Sensors belong to **that slot only**. A second person can add the same cuff agai
 
 Each sync **drains** the BLE history dump, then publishes the record with the **newest timestamp for the selected slot** — not the first packet.
 
+**Delete:** Removing the **last** Veroval device for a cuff also removes the host Bluetooth bond. Deleting only one of two user slots (User 1 or User 2) leaves the bond so the other slot keeps working.
+
 ## Sensors
 
 | Entity | Notes |

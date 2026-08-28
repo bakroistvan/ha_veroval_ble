@@ -8,7 +8,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_CUFF_USER
+from .bluez_pair import async_unpair_address
+from .const import CONF_CUFF_USER, DOMAIN
 from .coordinator import (
     VerovalBleConfigEntry,
     VerovalBleCoordinator,
@@ -56,3 +57,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -
 async def async_unload_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove the host BlueZ bond when the last entry for this cuff is deleted."""
+    address = _entry_address(entry).lower()
+    remaining = [
+        other
+        for other in hass.config_entries.async_entries(DOMAIN)
+        if other.entry_id != entry.entry_id
+        and _entry_address(other).lower() == address
+    ]
+    if remaining:
+        _LOGGER.debug(
+            "Keeping BlueZ bond for %s; %s other Veroval entry(ies) remain",
+            address,
+            len(remaining),
+        )
+        return
+
+    _LOGGER.debug("Last Veroval entry for %s deleted; removing BlueZ bond", address)
+    await async_unpair_address(address)
