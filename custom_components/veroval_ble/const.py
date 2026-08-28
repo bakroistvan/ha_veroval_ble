@@ -1,0 +1,15 @@
+"""Constants for Veroval Blood Pressure BLE."""
+
+from __future__ import annotations
+
+DOMAIN = "veroval_ble"
+
+CONF_CUFF_USER = "cuff_user"
+
+CHARACTERISTIC_BLOOD_PRESSURE = "00002a35-0000-1000-8000-00805f9b34fb"
+MANUFACTURER_ID = 2751  # 0x0ABF PAUL HARTMANN AG
+LOCAL_NAME = "BPU26"
+
+DUMP_IDLE_SECONDS = 2.0
+DUMP_TIMEOUT_SECONDS = 15.0
+UPDATE_INTERVAL = 10

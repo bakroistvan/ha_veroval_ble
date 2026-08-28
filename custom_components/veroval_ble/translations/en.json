@@ -1,0 +1,62 @@
+{
+  "config": {
+    "flow_title": "{name} ({address})",
+    "step": {
+      "user": {
+        "title": "Veroval Blood Pressure BLE",
+        "description": "Select a discovered BPU26 cuff. Press User 1 or User 2 on the cuff so it advertises if none appear.",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Set up Veroval BPU26",
+        "description": "Do you want to set up {name} (`{address}`)?"
+      },
+      "pairing": {
+        "title": "Pair the cuff on the host",
+        "description": "The 6-digit PIN is OS Bluetooth pairing, not a Home Assistant prompt.\n\n1. Press **User 1** or **User 2** on the cuff so Bluetooth flashes (about 2 minutes). A new measurement is not required.\n2. Unpair the cuff from medi.connect and any phone. Only one client should hold the bond.\n3. On the Home Assistant host (SSH / Terminal add-on), run `bluetoothctl`, then `scan on`, `pair {address}`, enter the PIN shown on the cuff, and `trust {address}`.\n4. ESPHome Bluetooth Proxy cannot pair this cuff (no PIN UI) and is unsupported.\n\nIf advertising stops, press User 1 or User 2 again and retry `pair`."
+      },
+      "user_slot": {
+        "title": "Which user?",
+        "description": "Choose the cuff memory slot this Home Assistant device should publish (**User 1** or **User 2**, same labels as the buttons). The GATT dump may still contain both slots; only the newest timestamp for this slot is used.\n\nA second person can add the same cuff later and pick the other user.",
+        "data": {
+          "cuff_user": "Cuff user"
+        }
+      }
+    },
+    "abort": {
+      "not_supported": "Device not supported",
+      "no_devices_found": "[%key:common::config_flow::abort::no_devices_found%]",
+      "already_in_progress": "[%key:common::config_flow::abort::already_in_progress%]",
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "systolic": {
+        "name": "Systolic"
+      },
+      "diastolic": {
+        "name": "Diastolic"
+      },
+      "pulse": {
+        "name": "Pulse"
+      },
+      "timestamp": {
+        "name": "Measured time"
+      },
+      "user_slot": {
+        "name": "User slot"
+      },
+      "rssi": {
+        "name": "RSSI"
+      }
+    },
+    "binary_sensor": {
+      "irregular_pulse": {
+        "name": "Irregular pulse"
+      }
+    }
+  }
+}
