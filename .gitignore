@@ -1,0 +1,24 @@
+# Raw HCI captures may contain device identifiers and health readings
+docs/captures/*.btsnoop
+docs/captures/*.log
+docs/captures/bugreport*.zip
+docs/captures/bugreport*/
+
+# Analyzer exports contain MAC addresses and full measurement history
+docs/captures/exports/
+
+# Filled session notes may contain PIN and cuff readings (keep templates tracked)
+docs/captures/ground_truth_*.md
+
+# Keep capture guide and templates
+!docs/captures/README.md
+!docs/captures/WIRESHARK.md
+!docs/captures/ground_truth_bonded.md.template
+!docs/captures/ground_truth_pairing.md.template
+
+# Local Cursor plans may repeat capture values
+.cursor/plans/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
