@@ -307,13 +307,7 @@ class BlueZPairSession:
         from dbus_fast.constants import BusType
 
         self._bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-        if self.device_path is None:
-            self.device_path = await self._find_device_path()
-        if self.device_path is None:
-            raise DeviceNotFoundError(
-                f"BlueZ has no device object for {self.address}. "
-                "Press User 1 or User 2 so the cuff advertises, then scan again."
-            )
+        await self._async_resolve_device_path()
 
         props = await self._device1_props()
         if _dbus_bool(props.get("Paired")):
@@ -526,6 +520,29 @@ class BlueZPairSession:
             objects = await _get_managed_objects(self._bus)
             ifaces = objects.get(resolved) or {}
         return ifaces.get(DEVICE_INTERFACE) or {}
+
+    async def _async_resolve_device_path(self) -> None:
+        """Resolve a live BlueZ Device1 path, retrying briefly for export races."""
+        last_error: DeviceNotFoundError | None = None
+        for attempt in range(8):
+            try:
+                if self.device_path is None:
+                    self.device_path = await self._find_device_path()
+                if self.device_path is None:
+                    raise DeviceNotFoundError(
+                        f"BlueZ has no device object for {self.address}. "
+                        "Press User 1 or User 2 so the cuff advertises, then scan again."
+                    )
+                await self._device1_props()
+                return
+            except DeviceNotFoundError as err:
+                last_error = err
+                self.device_path = None
+                if attempt == 7:
+                    break
+                await asyncio.sleep(0.25)
+        assert last_error is not None
+        raise last_error
 
     async def _find_device_path(self) -> str | None:
         """Find `/org/bluez/hciX/dev_…` for this address via ObjectManager."""

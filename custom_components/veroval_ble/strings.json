@@ -52,7 +52,8 @@
       "invalid_address": "Enter a Bluetooth address like AA:BB:CC:DD:EE:FF.",
       "invalid_pin": "Enter the 6-digit PIN shown on the cuff.",
       "pairing_failed": "Pairing failed. Press User 1 or User 2 so Bluetooth flashes, then try again.",
-      "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again."
+      "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again.",
+      "device_not_found": "BlueZ does not know this cuff yet. Press User 1 or User 2 so Bluetooth flashes, then tap Scan again."
     },
     "abort": {
       "not_supported": "Device not supported",

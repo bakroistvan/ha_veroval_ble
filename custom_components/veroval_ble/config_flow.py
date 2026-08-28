@@ -45,6 +45,9 @@ from .parser import CUFF_USER_1, CUFF_USER_2
 
 _LOGGER = logging.getLogger(__name__)
 
+# HA's scanner cache can outlive BlueZ Device1 objects for unpaired devices.
+ADVERTISEMENT_MAX_AGE_SECONDS = 30.0
+
 
 def _is_bpu26(service_info: BluetoothServiceInfoBleak) -> bool:
     """Return True if this advertisement looks like a Veroval BPU26."""
@@ -52,6 +55,20 @@ def _is_bpu26(service_info: BluetoothServiceInfoBleak) -> bool:
     if name == LOCAL_NAME or name.startswith(LOCAL_NAME):
         return True
     return MANUFACTURER_ID in service_info.manufacturer_data
+
+
+def _is_fresh_advertisement(service_info: BluetoothServiceInfoBleak) -> bool:
+    """Return True if this advertisement is recent enough that BlueZ may still know it."""
+    ad_time = getattr(service_info, "time", None)
+    if not isinstance(ad_time, (int, float)):
+        return False
+    age = time.monotonic() - ad_time
+    return 0 <= age <= ADVERTISEMENT_MAX_AGE_SECONDS
+
+
+def _is_host_adapter_advertisement(service_info: BluetoothServiceInfoBleak) -> bool:
+    """Return True if the advertisement was seen on the local BlueZ adapter."""
+    return is_local_bluez_device(service_info.device)
 
 
 def _normalize_address(value: str) -> str | None:
@@ -79,6 +96,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._pair_finish_task: asyncio.Task[None] | None = None
         self._pair_outcome: str | None = None
         self._pair_error_reason: str | None = None
+        self._not_found_error: str | None = None
 
     def _configured_slots(self, address: str) -> set[int]:
         """Return cuff-user slots already set up for this BLE address."""
@@ -161,7 +179,22 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         """Confirm the discovered cuff, then start in-UI pairing."""
         assert self._address is not None
         if user_input is not None:
-            return await self.async_step_pairing()
+            self._collect_discovered()
+            current = self._discovered_devices.get(self._address)
+            if current is None:
+                current = self._discovery_info
+            if (
+                current is not None
+                and _is_host_adapter_advertisement(current)
+                and _is_fresh_advertisement(current)
+            ):
+                self._discovery_info = current
+                return await self.async_step_pairing()
+            _LOGGER.debug(
+                "Discovery for %s is stale or not from the host adapter; scanning",
+                self._address,
+            )
+            return await self.async_step_scan()
 
         self._set_confirm_only()
         placeholders = {
@@ -174,9 +207,13 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     def _collect_discovered(self) -> None:
-        """Refresh the cache of BPU26 advertisements still in the scanner."""
+        """Cache fresh BPU26 advertisements from the host adapter only."""
         for discovery_info in async_discovered_service_info(self.hass, False):
             if not _is_bpu26(discovery_info):
+                continue
+            if not _is_host_adapter_advertisement(discovery_info):
+                continue
+            if not _is_fresh_advertisement(discovery_info):
                 continue
             address = discovery_info.address.lower()
             if address in self._discovered_devices:
@@ -236,6 +273,11 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         ) -> None:
             if not _is_bpu26(service_info):
                 return
+            if not _is_host_adapter_advertisement(service_info):
+                _LOGGER.debug(
+                    "Ignoring non-host advertisement for %s", service_info.address
+                )
+                return
             address = service_info.address.lower()
             if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
                 return
@@ -257,6 +299,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         ]
         try:
+            self._discovered_devices.clear()
             self._collect_discovered()
             if self._discovered_devices:
                 self.async_update_progress(1.0)
@@ -283,15 +326,6 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show wake-cuff instructions, then start a timed scan."""
-        self._collect_discovered()
-        titles = self._discovered_titles()
-        if titles:
-            if len(titles) == 1:
-                return await self._async_choose_address(next(iter(titles)))
-            return await self.async_step_pick_device()
-        if self._discovered_devices:
-            return self.async_abort(reason="already_configured")
-
         if user_input is None:
             return self.async_show_form(
                 step_id="user",
@@ -368,6 +402,10 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 return await self.async_step_scan()
 
+        if self._not_found_error:
+            errors.setdefault("base", self._not_found_error)
+            self._not_found_error = None
+
         return self.async_show_form(
             step_id="not_found",
             data_schema=vol.Schema({vol.Optional(CONF_ADDRESS): str}),
@@ -403,7 +441,11 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="pairing_not_supported")
         except DeviceNotFoundError:
             await self._async_close_pair_session()
-            return self.async_abort(reason="device_not_found")
+            _LOGGER.debug(
+                "BlueZ has no device object for %s; returning to scan", self._address
+            )
+            self._not_found_error = "device_not_found"
+            return await self.async_step_not_found()
         except ProxyNotSupportedError:
             await self._async_close_pair_session()
             return self.async_abort(reason="proxy_not_supported")
