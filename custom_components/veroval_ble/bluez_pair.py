@@ -175,75 +175,68 @@ async def async_unpair_address(address: str) -> None:
 
 
 def _build_passkey_agent(session: BlueZPairSession) -> Any:
-    """Build an org.bluez.Agent1 ServiceInterface bound to *session*."""
+    """Build an org.bluez.Agent1 ServiceInterface bound to *session*.
+
+    Annotations are D-Bus signatures, not Python types. Void methods omit the
+    return annotation; ``-> None`` is eval'd to Python None and crashes dbus-fast.
+    """
     from dbus_fast import DBusError
     from dbus_fast.service import ServiceInterface, dbus_method
 
-    # dbus-fast reads parameter annotations as D-Bus signature strings.
-    # Build the class without postponed evaluation of those signatures.
-    namespace: dict[str, Any] = {
-        "ServiceInterface": ServiceInterface,
-        "dbus_method": dbus_method,
-        "DBusError": DBusError,
-        "_LOGGER": _LOGGER,
-        "session": session,
-    }
-    exec(
-        """
-class VerovalPasskeyAgent(ServiceInterface):
-    def __init__(self):
-        super().__init__("org.bluez.Agent1")
-        self._session = session
+    class VerovalPasskeyAgent(ServiceInterface):
+        def __init__(self) -> None:
+            super().__init__(AGENT_INTERFACE)
+            self._session = session
 
-    @dbus_method()
-    def Release(self) -> None:
-        _LOGGER.debug("BlueZ agent Release")
+        @dbus_method()
+        def Release(self):
+            _LOGGER.debug("BlueZ agent Release")
 
-    @dbus_method()
-    async def RequestPinCode(self, device: 'o') -> 's':
-        pin = await self._session._await_passkey(device)
-        return f"{pin:06d}"
+        @dbus_method()
+        async def RequestPinCode(self, device: "o") -> "s":
+            pin = await self._session._await_passkey(device)
+            return f"{pin:06d}"
 
-    @dbus_method()
-    def DisplayPinCode(self, device: 'o', pincode: 's') -> None:
-        _LOGGER.debug("DisplayPinCode %s %s", device, pincode)
+        @dbus_method()
+        def DisplayPinCode(self, device: "o", pincode: "s"):
+            _LOGGER.debug("DisplayPinCode %s %s", device, pincode)
 
-    @dbus_method()
-    async def RequestPasskey(self, device: 'o') -> 'u':
-        return await self._session._await_passkey(device)
+        @dbus_method()
+        async def RequestPasskey(self, device: "o") -> "u":
+            return await self._session._await_passkey(device)
 
-    @dbus_method()
-    def DisplayPasskey(self, device: 'o', passkey: 'u', entered: 'q') -> None:
-        _LOGGER.debug("DisplayPasskey %s %06u entered=%s", device, passkey, entered)
+        @dbus_method()
+        def DisplayPasskey(self, device: "o", passkey: "u", entered: "q"):
+            _LOGGER.debug(
+                "DisplayPasskey %s %06u entered=%s", device, passkey, entered
+            )
 
-    @dbus_method()
-    def RequestConfirmation(self, device: 'o', passkey: 'u') -> None:
-        _LOGGER.warning(
-            "Unexpected RequestConfirmation for %s (%06u); rejecting",
-            device,
-            passkey,
-        )
-        raise DBusError(
-            "org.bluez.Error.Rejected",
-            "Numeric comparison is not supported for this cuff",
-        )
+        @dbus_method()
+        def RequestConfirmation(self, device: "o", passkey: "u"):
+            _LOGGER.warning(
+                "Unexpected RequestConfirmation for %s (%06u); rejecting",
+                device,
+                passkey,
+            )
+            raise DBusError(
+                "org.bluez.Error.Rejected",
+                "Numeric comparison is not supported for this cuff",
+            )
 
-    @dbus_method()
-    def RequestAuthorization(self, device: 'o') -> None:
-        _LOGGER.debug("RequestAuthorization %s", device)
+        @dbus_method()
+        def RequestAuthorization(self, device: "o"):
+            _LOGGER.debug("RequestAuthorization %s", device)
 
-    @dbus_method()
-    def AuthorizeService(self, device: 'o', uuid: 's') -> None:
-        _LOGGER.debug("AuthorizeService %s %s", device, uuid)
+        @dbus_method()
+        def AuthorizeService(self, device: "o", uuid: "s"):
+            _LOGGER.debug("AuthorizeService %s %s", device, uuid)
 
-    @dbus_method()
-    def Cancel(self) -> None:
-        _LOGGER.debug("BlueZ agent Cancel")
-        self._session._cancel_passkey()
-""",
-        namespace,
-    )
-    return namespace["VerovalPasskeyAgent"]()
+        @dbus_method()
+        def Cancel(self):
+            _LOGGER.debug("BlueZ agent Cancel")
+            self._session._cancel_passkey()
+
+    return VerovalPasskeyAgent()
 
 
 class BlueZPairSession:
