@@ -30,6 +30,7 @@ from .bluez_pair import (
     PairingNotSupportedError,
     ProxyNotSupportedError,
     bluez_path_from_device,
+    format_pairing_error,
     is_bluez_pairing_supported,
     is_local_bluez_device,
 )
@@ -96,6 +97,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._pair_finish_task: asyncio.Task[None] | None = None
         self._pair_outcome: str | None = None
         self._pair_error_reason: str | None = None
+        self._pair_error_detail: str | None = None
         self._not_found_error: str | None = None
 
     def _configured_slots(self, address: str) -> set[int]:
@@ -146,6 +148,22 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._pair_finish_task = None
         if session is not None:
             await session.close()
+
+    def _abort_pairing_failed(self, detail: str = "") -> ConfigFlowResult:
+        """Abort setup and include the BlueZ/D-Bus error in the UI and logs."""
+        error = (detail or self._pair_error_detail or "").strip() or "unknown error"
+        _LOGGER.warning("Aborting pairing for %s: %s", self._address, error)
+        return self.async_abort(
+            reason="pairing_failed",
+            description_placeholders={"error": error},
+        )
+
+    def _record_pairing_error(
+        self, err: BaseException, reason: str = "pairing_failed"
+    ) -> None:
+        """Remember the abort reason and a human-readable BlueZ detail."""
+        self._pair_error_reason = reason
+        self._pair_error_detail = format_pairing_error(err)
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
@@ -419,6 +437,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         """Start host-adapter BlueZ pairing (or skip if already bonded)."""
         assert self._address is not None
         _LOGGER.debug("Starting UI pairing for %s", self._address)
+        self._pair_error_reason = None
+        self._pair_error_detail = None
 
         if not is_bluez_pairing_supported():
             return self.async_abort(reason="pairing_not_supported")
@@ -433,7 +453,13 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._pair_session = session
         try:
             await session.open()
-        except AgentUnavailableError:
+        except AgentUnavailableError as err:
+            self._record_pairing_error(err, "agent_unavailable")
+            _LOGGER.warning(
+                "BlueZ pairing agent unavailable for %s: %s",
+                self._address,
+                self._pair_error_detail,
+            )
             await self._async_close_pair_session()
             return self.async_abort(reason="agent_unavailable")
         except PairingNotSupportedError:
@@ -449,10 +475,10 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         except ProxyNotSupportedError:
             await self._async_close_pair_session()
             return self.async_abort(reason="proxy_not_supported")
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
             _LOGGER.exception("Failed to open BlueZ pairing session")
             await self._async_close_pair_session()
-            return self.async_abort(reason="pairing_failed")
+            return self._abort_pairing_failed(format_pairing_error(err))
 
         if session.already_paired:
             await self._async_close_pair_session()
@@ -468,10 +494,10 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             return await self._pair_session.wait_for_passkey_or_done()
         except PairingError as err:
-            self._pair_error_reason = err.reason
+            self._record_pairing_error(err, err.reason)
             raise
         except Exception as err:
-            self._pair_error_reason = "pairing_failed"
+            self._record_pairing_error(err)
             raise PairingFailedError(str(err)) from err
 
     async def async_step_pair_wait(
@@ -481,6 +507,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._address is not None
         if self._pair_wait_task is None:
             self._pair_error_reason = None
+            self._pair_error_detail = None
             self._pair_wait_task = self.hass.async_create_task(
                 self._async_run_pair_wait(),
                 f"{DOMAIN}_pair_wait",
@@ -499,12 +526,13 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
 
         try:
             self._pair_outcome = await self._pair_wait_task
-        except PairingError:
+        except PairingError as err:
             self._pair_outcome = "failed"
-        except Exception:  # noqa: BLE001
+            self._record_pairing_error(err, err.reason)
+        except Exception as err:  # noqa: BLE001
             _LOGGER.exception("pair_wait failed")
             self._pair_outcome = "failed"
-            self._pair_error_reason = "pairing_failed"
+            self._record_pairing_error(err)
         finally:
             self._pair_wait_task = None
         return self.async_show_progress_done(next_step_id="pair_wait_done")
@@ -521,6 +549,14 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_user_slot()
         reason = self._pair_error_reason or "pairing_failed"
         await self._async_close_pair_session()
+        if reason == "pairing_failed":
+            return self._abort_pairing_failed()
+        _LOGGER.warning(
+            "Aborting pairing for %s: %s (%s)",
+            self._address,
+            reason,
+            self._pair_error_detail or "",
+        )
         return self.async_abort(reason=reason)
 
     async def async_step_enter_pin(
@@ -535,15 +571,15 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             if not pin.isdigit() or not 4 <= len(pin) <= 6:
                 errors[CONF_PIN] = "invalid_pin"
             elif self._pair_session is None:
-                return self.async_abort(reason="pairing_failed")
+                return self._abort_pairing_failed("pairing session was closed")
             else:
                 try:
                     self._pair_session.provide_passkey(pin)
                 except ValueError:
                     errors[CONF_PIN] = "invalid_pin"
-                except PairingError:
+                except PairingError as err:
                     await self._async_close_pair_session()
-                    return self.async_abort(reason="pairing_failed")
+                    return self._abort_pairing_failed(format_pairing_error(err))
                 else:
                     return await self.async_step_pair_finish()
 
@@ -563,10 +599,10 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             await self._pair_session.wait_finished()
         except PairingError as err:
-            self._pair_error_reason = err.reason
+            self._record_pairing_error(err, err.reason)
             raise
         except Exception as err:
-            self._pair_error_reason = "pairing_failed"
+            self._record_pairing_error(err)
             raise PairingFailedError(str(err)) from err
         finally:
             await self._async_close_pair_session()
@@ -578,6 +614,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._address is not None
         if self._pair_finish_task is None:
             self._pair_error_reason = None
+            self._pair_error_detail = None
             self._pair_finish_task = self.hass.async_create_task(
                 self._async_run_pair_finish(),
                 f"{DOMAIN}_pair_finish",
@@ -597,12 +634,13 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         try:
             await self._pair_finish_task
             self._pair_outcome = "done"
-        except PairingError:
+        except PairingError as err:
             self._pair_outcome = "failed"
-        except Exception:  # noqa: BLE001
+            self._record_pairing_error(err, err.reason)
+        except Exception as err:  # noqa: BLE001
             _LOGGER.exception("pair_finish failed")
             self._pair_outcome = "failed"
-            self._pair_error_reason = "pairing_failed"
+            self._record_pairing_error(err)
         finally:
             self._pair_finish_task = None
         return self.async_show_progress_done(next_step_id="pair_finish_done")
@@ -614,6 +652,14 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._pair_outcome == "done":
             return await self.async_step_user_slot()
         reason = self._pair_error_reason or "pairing_failed"
+        if reason == "pairing_failed":
+            return self._abort_pairing_failed()
+        _LOGGER.warning(
+            "Aborting pairing for %s: %s (%s)",
+            self._address,
+            reason,
+            self._pair_error_detail or "",
+        )
         return self.async_abort(reason=reason)
 
     async def async_step_user_slot(

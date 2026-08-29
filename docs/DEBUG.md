@@ -1,44 +1,106 @@
 # Debug logging
 
-Logger: `custom_components.veroval_ble`.
+Logger: `custom_components.veroval_ble` (includes `config_flow`, `bluez_pair`, `client`, `coordinator`).
 
 Measurement payload hex is logged only at **DEBUG**. Enable it for a short session, then turn it off.
 
-## Enable
+## Where to read the logs
 
-### UI (preferred)
+| Place | What it is |
+|-------|------------|
+| **Settings → System → Logs** | Home Assistant Core log. Filter by `veroval_ble`. Use **Download full log** if the on-screen tail is too short. |
+| Host journal (HAOS / Supervised) | BlueZ itself (`bluetoothd`) is **not** in Core logs. SSH or the Terminal add-on: `journalctl -u bluetooth.service -n 200 --no-pager` |
+
+A pairing abort in the UI now includes the BlueZ/D-Bus error in the message (`Pairing failed ({error}). …`). The same detail is written at **WARNING** even without debug logging.
+
+## Max verbosity
+
+### UI (integration only)
 
 1. **Settings → Devices & services**
 2. Open **Veroval Blood Pressure BLE**
 3. ⋮ → **Enable debug logging**
 
-Disable the same way when finished.
+That sets `custom_components.veroval_ble` to DEBUG until you disable it the same way (or restart). Enough for pairing stages, Device1 snapshots, and PIN-request timing. Does **not** enable `bleak` / `habluetooth`.
 
-### YAML (persists across restart)
+### YAML (persists across restart — use this for “max”)
+
+In `configuration.yaml`:
 
 ```yaml
 logger:
   default: info
   logs:
     custom_components.veroval_ble: debug
-```
-
-Optional stack loggers (noisy):
-
-```yaml
+    homeassistant.components.bluetooth: debug
     habluetooth: debug
     bleak: debug
+    dbus_fast: debug
 ```
+
+Restart Home Assistant after saving. `bleak` / `habluetooth` / `dbus_fast` are noisy; turn them off when finished.
 
 ### Action (until restart)
 
-**Developer tools → Actions → `logger.set_level`**
+Use this when you do not want to edit `configuration.yaml` or restart. The new levels apply immediately and **revert on the next Home Assistant restart**. You must be an **administrator**.
+
+1. Open **Developer tools** in the sidebar (the hammer icon).
+2. Open the **Actions** tab (older HA labeled this **Services**).
+3. In **Action**, search for `logger.set_level` (UI name: **Logger: Set logger level**).
+4. This action has no form fields. Switch to YAML (**⋮ → Edit in YAML**, or **Go to YAML mode**).
+5. Replace the contents with:
 
 ```yaml
-custom_components.veroval_ble: debug
+action: logger.set_level
+data:
+  custom_components.veroval_ble: debug
+  homeassistant.components.bluetooth: debug
+  habluetooth: debug
+  bleak: debug
+  dbus_fast: debug
 ```
 
-## Capture a session
+6. **Perform action**. You should get a green success; nothing else is printed here.
+7. Confirm: **Settings → System → Logs**. Filter `veroval_ble`. A pairing attempt should show `DEBUG` lines such as `Starting UI pairing` / `BlueZ Device1`.
+
+For pairing diagnosis, `custom_components.veroval_ble: debug` is the one that matters. The other four are the Bluetooth stack and are noisy.
+
+Turn it back down without restarting (same action, YAML):
+
+```yaml
+action: logger.set_level
+data:
+  custom_components.veroval_ble: info
+  homeassistant.components.bluetooth: info
+  habluetooth: warning
+  bleak: warning
+  dbus_fast: warning
+```
+
+If YAML mode shows only the `data:` map (no `action:` line), paste just the keys under `data:` — Home Assistant already selected the action in the dropdown.
+
+## Capture a pairing failure
+
+1. Enable max verbosity as above.
+2. Press **User 1** or **User 2** so Bluetooth flashes.
+3. Run setup until it aborts.
+4. **Settings → System → Logs** → download the log.
+5. Search for `Pairing failed`, `Calling BlueZ Pair()`, `BlueZ Device1`, and `Aborting pairing`.
+6. Optionally capture `journalctl -u bluetooth.service -n 200 --no-pager` from the same window.
+7. Disable debug logging.
+
+Typical Core lines:
+
+- `DEBUG` `Starting UI pairing for aa:bb:…`
+- `DEBUG` `BlueZ Device1 … path=/org/bluez/hci0/dev_… Paired=False Connected=… RSSI=…`
+- `INFO` `Calling BlueZ Pair() for …`
+- `DEBUG` `RequestPasskey for /org/bluez/…` (cuff showed a PIN)
+- `WARNING` `Pairing failed for … at Device1.Pair: org.bluez.Error.…; Address=… Paired=… Connected=…`
+- `WARNING` `Aborting pairing for …: org.bluez.Error.…`
+
+The 6-digit PIN is not written to the log.
+
+## Capture a measurement session
 
 1. Enable debug as above.
 2. Press **User 1** or **User 2** on the cuff so it advertises (~2 minutes).
@@ -50,9 +112,9 @@ custom_components.veroval_ble: debug
 
 | Level | What you see |
 |-------|----------------|
-| **DEBUG** | Advertisement seen; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); `stop_notify` and disconnect; config-flow steps including user choice |
-| **INFO** | Config entry setup (address and User 1/2); successful latest reading for that slot (systolic / diastolic / pulse / time, no raw hex) |
-| **WARNING** | Connect timeout, missing Blood Pressure Measurement characteristic, parse failure, auth/pairing errors (re-run setup on the host adapter to re-pair) |
+| **DEBUG** | Advertisement seen; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); `stop_notify` and disconnect; config-flow steps; BlueZ Device1 snapshot; agent PIN request (not the PIN value); pairing stage tracebacks |
+| **INFO** | Config entry setup (address and User 1/2); successful latest reading for that slot (systolic / diastolic / pulse / time, no raw hex); `Pair()` started; pair+trust succeeded |
+| **WARNING** | Connect timeout, missing Blood Pressure Measurement characteristic, parse failure, pairing failures with the BlueZ error name and Device1 properties |
 | **ERROR** | Unexpected exceptions around a poll |
 
 Advertisements are not logged at INFO (the cuff can advertise for ~2 minutes). Health hex stays at DEBUG only.
@@ -62,6 +124,8 @@ Advertisements are not logged at INFO (the cuff can advertise for ~2 minutes). H
 Setup pairs on the **host Bluetooth adapter** and asks for the cuff’s 6-digit PIN in the UI. Close any open `bluetoothctl` session first so the integration can register the BlueZ agent.
 
 ESPHome Bluetooth Proxy cannot enter the PIN — use the HAOS built-in or USB adapter for pairing.
+
+If the UI says **Pairing failed**, the `{error}` text is the BlueZ D-Bus name (for example `org.bluez.Error.AuthenticationFailed` or `org.bluez.Error.ConnectionAttemptFailed`). Common causes: cuff Bluetooth not flashing, medi.connect or a phone still bonded, wrong PIN, or a stale bond on the HA adapter.
 
 ## Hardware-in-the-loop (no Home Assistant)
 

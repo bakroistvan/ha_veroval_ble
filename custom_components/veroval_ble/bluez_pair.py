@@ -66,6 +66,127 @@ class PairingFailedError(PairingError):
         super().__init__("pairing_failed", message)
 
 
+_SNAPSHOT_KEYS = (
+    "Address",
+    "AddressType",
+    "Name",
+    "Alias",
+    "Adapter",
+    "Paired",
+    "Bonded",
+    "Connected",
+    "Trusted",
+    "Blocked",
+    "ServicesResolved",
+    "LegacyPairing",
+    "RSSI",
+    "TxPower",
+)
+
+_BLUEZ_ERROR_HINTS: dict[str, str] = {
+    "org.bluez.Error.AuthenticationFailed": (
+        "wrong PIN, cuff not in pair mode, or another device still bonded"
+    ),
+    "org.bluez.Error.AuthenticationCanceled": (
+        "pairing cancelled (often by the cuff or the agent)"
+    ),
+    "org.bluez.Error.AuthenticationRejected": "pairing rejected",
+    "org.bluez.Error.AuthenticationTimeout": "PIN entry timed out",
+    "org.bluez.Error.ConnectionAttemptFailed": (
+        "could not connect; press User 1 or User 2 so Bluetooth flashes"
+    ),
+    "org.bluez.Error.Failed": (
+        "BlueZ Failed; often a stale bond or the cuff is paired to another device"
+    ),
+    "org.bluez.Error.InProgress": "another pairing is already in progress",
+    "org.bluez.Error.NotReady": "Bluetooth adapter is not ready",
+    "org.bluez.Error.AlreadyExists": "already paired on this adapter",
+    "org.bluez.Error.NotAvailable": (
+        "device not available; wake the cuff and scan again"
+    ),
+}
+
+
+def _dbus_plain(value: Any) -> Any:
+    """Unwrap a dbus-fast Variant to a plain Python value."""
+    return getattr(value, "value", value)
+
+
+def format_device_snapshot(props: dict[str, Any]) -> str:
+    """Return a compact Device1 property summary for logs."""
+    parts: list[str] = []
+    for key in _SNAPSHOT_KEYS:
+        if key not in props:
+            continue
+        parts.append(f"{key}={_dbus_plain(props[key])!r}")
+    return " ".join(parts)
+
+
+def _iter_exception_chain(err: BaseException) -> list[BaseException]:
+    """Walk ``__cause__`` / ``__context__`` without repeating."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = err
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def format_pairing_error(err: BaseException) -> str:
+    """Return a compact BlueZ/D-Bus error string for logs and the UI."""
+    dbus_type: str | None = None
+    dbus_text: str | None = None
+    for exc in _iter_exception_chain(err):
+        name = getattr(exc, "type", None)
+        if isinstance(name, str) and name:
+            dbus_type = name
+            text = getattr(exc, "text", None)
+            if isinstance(text, str) and text:
+                dbus_text = text
+            elif str(exc).strip():
+                dbus_text = str(exc).strip()
+            break
+    if dbus_type:
+        core = f"{dbus_type}: {dbus_text}" if dbus_text else dbus_type
+        hint = _BLUEZ_ERROR_HINTS.get(dbus_type)
+        if hint:
+            return f"{core} ({hint})"
+        return core
+    message = str(err).strip()
+    name = type(err).__name__
+    if message and message != name:
+        return f"{name}: {message}"
+    return message or name
+
+
+def log_pairing_failure(
+    address: str,
+    stage: str,
+    err: BaseException,
+    *,
+    device_path: str | None = None,
+    snapshot: str = "",
+) -> None:
+    """Log a pairing failure at WARNING (details) and DEBUG (traceback)."""
+    where = f"{stage} {device_path}" if device_path else stage
+    extra = f"; {snapshot}" if snapshot else ""
+    _LOGGER.warning(
+        "Pairing failed for %s at %s: %s%s",
+        address,
+        where,
+        format_pairing_error(err),
+        extra,
+    )
+    _LOGGER.debug(
+        "Pairing failure traceback for %s at %s",
+        address,
+        stage,
+        exc_info=err,
+    )
+
+
 def is_bluez_pairing_supported() -> bool:
     """Return True when this host can attempt in-UI BlueZ passkey pairing."""
     if sys.platform != "linux":
@@ -287,6 +408,11 @@ class BlueZPairSession:
             raise ValueError("invalid_pin")
         if self._passkey_future is None or self._passkey_future.done():
             raise PairingFailedError("No passkey request is pending")
+        _LOGGER.debug(
+            "Passkey provided for %s (%s digits); PIN value is not logged",
+            self.address,
+            len(digits),
+        )
         self._passkey_future.set_result(value)
 
     async def open(self) -> None:
@@ -299,10 +425,18 @@ class BlueZPairSession:
         from dbus_fast.aio import MessageBus
         from dbus_fast.constants import BusType
 
+        _LOGGER.debug("Connecting to BlueZ system bus to pair %s", self.address)
         self._bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
         await self._async_resolve_device_path()
 
         props = await self._device1_props()
+        snapshot = format_device_snapshot(props) or "no Device1 properties"
+        _LOGGER.debug(
+            "BlueZ Device1 %s path=%s %s",
+            self.address,
+            self.device_path,
+            snapshot,
+        )
         if _dbus_bool(props.get("Paired")):
             _LOGGER.debug("%s is already paired", self.address)
             self.already_paired = True
@@ -323,6 +457,13 @@ class BlueZPairSession:
                 self._bus.unexport(AGENT_PATH)
             except Exception:  # noqa: BLE001
                 pass
+            log_pairing_failure(
+                self.address,
+                "register_agent",
+                err,
+                device_path=self.device_path,
+                snapshot=snapshot,
+            )
             raise AgentUnavailableError(
                 "Could not register the Bluetooth pairing agent. "
                 "Close bluetoothctl if it is open, then try again."
@@ -337,6 +478,11 @@ class BlueZPairSession:
         assert self.device_path is not None
         assert self._bus is not None
         self.passkey_requested.clear()
+        _LOGGER.info(
+            "Calling BlueZ Pair() for %s path=%s",
+            self.address,
+            self.device_path,
+        )
         self._pair_task = asyncio.create_task(
             self._pair_and_trust(), name=f"veroval_ble_pair_{self.address}"
         )
@@ -350,6 +496,11 @@ class BlueZPairSession:
             return "already_paired"
         assert self._pair_task is not None
 
+        _LOGGER.debug(
+            "Waiting for cuff PIN or Pair() completion for %s (timeout=%ss)",
+            self.address,
+            PAIR_TIMEOUT_SECONDS,
+        )
         passkey_waiter = asyncio.create_task(
             self.passkey_requested.wait(), name="veroval_ble_passkey_wait"
         )
@@ -363,10 +514,19 @@ class BlueZPairSession:
             passkey_waiter.cancel()
             self._cancel_passkey()
             self._pair_task.cancel()
-            raise PairingFailedError("Pairing timed out waiting for the cuff PIN")
+            err = PairingFailedError("Pairing timed out waiting for the cuff PIN")
+            log_pairing_failure(
+                self.address,
+                "wait_for_pin",
+                err,
+                device_path=self.device_path,
+                snapshot=await self._device_snapshot_text(),
+            )
+            raise err
 
         if passkey_waiter in done and self.passkey_requested.is_set():
             passkey_waiter.cancel()
+            _LOGGER.debug("BlueZ requested a passkey for %s", self.address)
             if self._pair_task.done():
                 exc = self._pair_task.exception()
                 if exc is not None:
@@ -374,9 +534,21 @@ class BlueZPairSession:
             return "need_pin"
 
         passkey_waiter.cancel()
-        await self._pair_task
+        try:
+            await self._pair_task
+        except Exception as err:
+            if self._pair_error is None:
+                log_pairing_failure(
+                    self.address,
+                    "pair_without_pin",
+                    err,
+                    device_path=self.device_path,
+                    snapshot=await self._device_snapshot_text(),
+                )
+            raise PairingFailedError(str(err)) from err
         if self._pair_error is not None:
             raise PairingFailedError(str(self._pair_error)) from self._pair_error
+        _LOGGER.debug("Pair() finished for %s without requesting a PIN", self.address)
         return "done"
 
     async def wait_finished(self) -> None:
@@ -389,7 +561,25 @@ class BlueZPairSession:
         except TimeoutError as err:
             self._cancel_passkey()
             self._pair_task.cancel()
-            raise PairingFailedError("Pairing timed out after PIN entry") from err
+            wrapped = PairingFailedError("Pairing timed out after PIN entry")
+            log_pairing_failure(
+                self.address,
+                "wait_after_pin",
+                wrapped,
+                device_path=self.device_path,
+                snapshot=await self._device_snapshot_text(),
+            )
+            raise wrapped from err
+        except Exception as err:
+            if self._pair_error is None:
+                log_pairing_failure(
+                    self.address,
+                    "wait_after_pin",
+                    err,
+                    device_path=self.device_path,
+                    snapshot=await self._device_snapshot_text(),
+                )
+            raise PairingFailedError(str(err)) from err
         if self._pair_error is not None:
             raise PairingFailedError(str(self._pair_error)) from self._pair_error
 
@@ -446,7 +636,13 @@ class BlueZPairSession:
             _LOGGER.info("Paired and trusted %s", self.address)
         except Exception as err:
             self._pair_error = err
-            _LOGGER.warning("Pair failed for %s: %s", self.address, err)
+            log_pairing_failure(
+                self.address,
+                "Device1.Pair",
+                err,
+                device_path=self.device_path,
+                snapshot=await self._device_snapshot_text(),
+            )
             raise
 
     async def _set_trusted(self) -> None:
@@ -475,6 +671,14 @@ class BlueZPairSession:
             if reply.message_type == MessageType.ERROR:
                 raise DBusError._from_message(reply)
         _LOGGER.debug("Trusted %s", self.device_path)
+
+    async def _device_snapshot_text(self) -> str:
+        """Return Device1 properties for logs, or an error note."""
+        try:
+            props = await self._device1_props()
+        except Exception as err:  # noqa: BLE001
+            return f"Device1 props unavailable ({format_pairing_error(err)})"
+        return format_device_snapshot(props) or "no Device1 properties"
 
     async def _device1_proxy(self) -> Any:
         """Return an org.bluez.Device1 proxy for the resolved path."""
@@ -521,6 +725,12 @@ class BlueZPairSession:
             try:
                 if self.device_path is None:
                     self.device_path = await self._find_device_path()
+                _LOGGER.debug(
+                    "Resolve Device1 %s attempt=%s path=%s",
+                    self.address,
+                    attempt + 1,
+                    self.device_path,
+                )
                 if self.device_path is None:
                     raise DeviceNotFoundError(
                         f"BlueZ has no device object for {self.address}. "
@@ -535,6 +745,11 @@ class BlueZPairSession:
                     break
                 await asyncio.sleep(0.25)
         assert last_error is not None
+        _LOGGER.warning(
+            "BlueZ has no Device1 object for %s after retries: %s",
+            self.address,
+            last_error,
+        )
         raise last_error
 
     async def _find_device_path(self) -> str | None:
