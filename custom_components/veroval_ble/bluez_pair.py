@@ -406,14 +406,17 @@ class BlueZPairSession:
         value = int(digits)
         if value > 999999:
             raise ValueError("invalid_pin")
-        if self._passkey_future is None or self._passkey_future.done():
+        future = self._passkey_future
+        if future is None or future.cancelled():
             raise PairingFailedError("No passkey request is pending")
+        if future.done():
+            return
         _LOGGER.debug(
             "Passkey provided for %s (%s digits); PIN value is not logged",
             self.address,
             len(digits),
         )
-        self._passkey_future.set_result(value)
+        future.set_result(value)
 
     async def open(self) -> None:
         """Connect to the system bus, resolve the device, register the agent."""
@@ -504,16 +507,20 @@ class BlueZPairSession:
         passkey_waiter = asyncio.create_task(
             self.passkey_requested.wait(), name="veroval_ble_passkey_wait"
         )
-        done, _pending = await asyncio.wait(
+        done, pending = await asyncio.wait(
             {self._pair_task, passkey_waiter},
             return_when=asyncio.FIRST_COMPLETED,
             timeout=PAIR_TIMEOUT_SECONDS,
         )
 
         if not done:
-            passkey_waiter.cancel()
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.wait(pending)
             self._cancel_passkey()
             self._pair_task.cancel()
+            await asyncio.wait({self._pair_task})
             err = PairingFailedError("Pairing timed out waiting for the cuff PIN")
             log_pairing_failure(
                 self.address,
@@ -525,7 +532,6 @@ class BlueZPairSession:
             raise err
 
         if passkey_waiter in done and self.passkey_requested.is_set():
-            passkey_waiter.cancel()
             _LOGGER.debug("BlueZ requested a passkey for %s", self.address)
             if self._pair_task.done():
                 exc = self._pair_task.exception()
@@ -533,7 +539,10 @@ class BlueZPairSession:
                     raise PairingFailedError(str(exc)) from exc
             return "need_pin"
 
-        passkey_waiter.cancel()
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.wait(pending)
         try:
             await self._pair_task
         except Exception as err:

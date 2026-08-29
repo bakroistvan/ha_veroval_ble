@@ -494,10 +494,14 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _async_run_pair_wait(self) -> str:
         """Background work for the connecting progress step."""
-        assert self._pair_session is not None
-        await self._pair_session.start_pair()
+        session = self._pair_session
+        if session is None:
+            err = PairingFailedError("pairing session was closed")
+            self._record_pairing_error(err)
+            raise err
+        await session.start_pair()
         try:
-            return await self._pair_session.wait_for_passkey_or_done()
+            return await session.wait_for_passkey_or_done()
         except PairingError as err:
             self._record_pairing_error(err, err.reason)
             raise
@@ -510,15 +514,17 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Progress: connecting and waiting for the cuff to show a PIN."""
         assert self._address is not None
-        if self._pair_wait_task is None:
+        first_visit = self._pair_wait_task is None
+        if first_visit:
             self._pair_error_reason = None
             self._pair_error_detail = None
             self._pair_wait_task = self.hass.async_create_task(
                 self._async_run_pair_wait(),
                 f"{DOMAIN}_pair_wait",
+                eager_start=False,
             )
 
-        if not self._pair_wait_task.done():
+        if first_visit or not self._pair_wait_task.done():
             return self.async_show_progress(
                 step_id="pair_wait",
                 progress_action="connecting",
@@ -575,6 +581,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             pin = str(user_input.get(CONF_PIN) or "").strip()
             if not pin.isdigit() or not 4 <= len(pin) <= 6:
                 errors[CONF_PIN] = "invalid_pin"
+            elif self._pair_finish_task is not None or self._pair_outcome == "done":
+                return await self.async_step_pair_finish()
             elif self._pair_session is None:
                 return self._abort_pairing_failed("pairing session was closed")
             else:
@@ -615,22 +623,32 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         finally:
             await self._async_close_pair_session()
 
+    async def _async_pair_finish_noop(self) -> None:
+        """No-op finish task so a second PIN submit still shows progress first."""
+
     async def async_step_pair_finish(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Progress: finish bonding after the PIN was entered."""
         assert self._address is not None
-        if self._pair_finish_task is None:
+        first_visit = self._pair_finish_task is None
+        if first_visit:
             if self._pair_outcome == "done":
-                return self.async_show_progress_done(next_step_id="pair_finish_done")
-            self._pair_error_reason = None
-            self._pair_error_detail = None
-            self._pair_finish_task = self.hass.async_create_task(
-                self._async_run_pair_finish(),
-                f"{DOMAIN}_pair_finish",
-            )
+                self._pair_finish_task = self.hass.async_create_task(
+                    self._async_pair_finish_noop(),
+                    f"{DOMAIN}_pair_finish",
+                    eager_start=False,
+                )
+            else:
+                self._pair_error_reason = None
+                self._pair_error_detail = None
+                self._pair_finish_task = self.hass.async_create_task(
+                    self._async_run_pair_finish(),
+                    f"{DOMAIN}_pair_finish",
+                    eager_start=False,
+                )
 
-        if not self._pair_finish_task.done():
+        if first_visit or not self._pair_finish_task.done():
             return self.async_show_progress(
                 step_id="pair_finish",
                 progress_action="finishing",

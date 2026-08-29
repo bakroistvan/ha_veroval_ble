@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
+
+import pytest
 
 _PATH = (
     Path(__file__).resolve().parents[1]
@@ -18,6 +21,7 @@ _bluez_pair = importlib.util.module_from_spec(_SPEC)
 sys.modules["veroval_ble_bluez_pair"] = _bluez_pair
 _SPEC.loader.exec_module(_bluez_pair)
 
+BlueZPairSession = _bluez_pair.BlueZPairSession
 format_device_snapshot = _bluez_pair.format_device_snapshot
 format_pairing_error = _bluez_pair.format_pairing_error
 PairingFailedError = _bluez_pair.PairingFailedError
@@ -76,3 +80,46 @@ def test_format_device_snapshot_unwraps_variants() -> None:
     assert "Connected=True" in snapshot
     assert "RSSI=-67" in snapshot
     assert "UUIDs" not in snapshot
+
+
+def test_provide_passkey_second_call_does_not_raise() -> None:
+    async def _run() -> None:
+        session = BlueZPairSession("aa:bb:cc:dd:ee:ff")
+        session._passkey_future = asyncio.get_running_loop().create_future()
+        session.provide_passkey("123456")
+        session.provide_passkey("654321")
+        assert session._passkey_future.result() == 123456
+
+    asyncio.run(_run())
+
+
+def test_provide_passkey_cancelled_future_fails() -> None:
+    async def _run() -> None:
+        session = BlueZPairSession("aa:bb:cc:dd:ee:ff")
+        future = asyncio.get_running_loop().create_future()
+        future.cancel()
+        session._passkey_future = future
+        with pytest.raises(PairingFailedError, match="No passkey request is pending"):
+            session.provide_passkey("123456")
+
+    asyncio.run(_run())
+
+
+def test_wait_for_passkey_or_done_does_not_leave_pending_cancelled_waiter() -> None:
+    async def _run() -> None:
+        session = BlueZPairSession("aa:bb:cc:dd:ee:ff")
+
+        async def _pair() -> None:
+            return None
+
+        session._pair_task = asyncio.create_task(_pair())
+        result = await session.wait_for_passkey_or_done()
+        assert result == "done"
+        pending_waiters = [
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name() == "veroval_ble_passkey_wait" and not task.done()
+        ]
+        assert pending_waiters == []
+
+    asyncio.run(_run())
