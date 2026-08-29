@@ -13,6 +13,8 @@ It pairs on the **Home Assistant host Bluetooth adapter**, drains the cuff histo
 
 [![Open your Home Assistant instance and open this repository inside HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bakroistvan&repository=ha_veroval_ble&category=integration)
 
+HACS store listing also needs a GitHub **description** and **topics** (`hacs`, `home-assistant`, `homeassistant`, `custom-component`, `integration`, `bluetooth`, `ble`, `blood-pressure`) under the repository Settings. Those fields are not files in git.
+
 ## Requirements
 
 - Home Assistant **2024.8.0** or later
