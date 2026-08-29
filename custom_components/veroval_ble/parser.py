@@ -14,7 +14,15 @@ CUFF_USER_2 = 2
 BLE_USER_1 = 0  # payload user_id
 BLE_USER_2 = 1
 
-_BPM_MIN_LENGTH = 19
+# flags + three mandatory SFLOATs (systolic, diastolic, MAP)
+_BPM_MIN_LENGTH = 7
+_FLAG_UNITS_KPA = 0x01
+_FLAG_TIMESTAMP = 0x02
+_FLAG_PULSE = 0x04
+_FLAG_USER_ID = 0x08
+_FLAG_STATUS = 0x10
+# mmHg = kPa * 760 / 101.325
+_KPA_TO_MMHG = 760 / 101.325
 
 # IEEE 11073-20601 SFLOAT specials apply when exponent is 0.
 _SFLOAT_NAN = 2047
@@ -84,25 +92,81 @@ class BloodPressureMeasurement:
         return bool(self.status & STATUS_IRREGULAR_PULSE)
 
 
+def _require_bytes(data: bytes, offset: int, size: int, field: str) -> None:
+    remaining = len(data) - offset
+    if remaining < size:
+        raise ValueError(
+            f"Blood Pressure Measurement {field} truncated: "
+            f"{remaining} bytes remaining (need {size})"
+        )
+
+
 def parse_bpm_indication(data: bytes) -> BloodPressureMeasurement:
-    """Parse a SIG Blood Pressure Measurement indication (flags 0x1E layout)."""
+    """Parse a SIG Blood Pressure Measurement indication from the flags byte."""
     if len(data) < _BPM_MIN_LENGTH:
         raise ValueError(
             f"Blood Pressure Measurement indication too short: "
             f"{len(data)} bytes (need {_BPM_MIN_LENGTH})"
         )
-    year = int.from_bytes(data[7:9], "little")
+    flags = data[0]
+    offset = 1
+
+    systolic = decode_sfloat(data, offset)
+    offset += 2
+    diastolic = decode_sfloat(data, offset)
+    offset += 2
+    mean_arterial = decode_sfloat(data, offset)
+    offset += 2
+
+    if flags & _FLAG_UNITS_KPA:
+        systolic *= _KPA_TO_MMHG
+        diastolic *= _KPA_TO_MMHG
+        mean_arterial *= _KPA_TO_MMHG
+
+    if flags & _FLAG_TIMESTAMP:
+        _require_bytes(data, offset, 7, "timestamp")
+        year = int.from_bytes(data[offset : offset + 2], "little")
+        timestamp = datetime(
+            year,
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+        )
+        offset += 7
+    else:
+        raise ValueError("Blood Pressure Measurement timestamp not present")
+
+    if flags & _FLAG_PULSE:
+        _require_bytes(data, offset, 2, "pulse")
+        pulse = decode_sfloat(data, offset)
+        offset += 2
+    else:
+        pulse = float("nan")
+
+    if flags & _FLAG_USER_ID:
+        _require_bytes(data, offset, 1, "user ID")
+        user_id = data[offset]
+        offset += 1
+    else:
+        raise ValueError("Blood Pressure Measurement user ID not present")
+
+    if flags & _FLAG_STATUS:
+        _require_bytes(data, offset, 2, "status")
+        status = int.from_bytes(data[offset : offset + 2], "little")
+    else:
+        status = 0
+
     return BloodPressureMeasurement(
-        flags=data[0],
-        systolic=decode_sfloat(data, 1),
-        diastolic=decode_sfloat(data, 3),
-        mean_arterial=decode_sfloat(data, 5),
-        timestamp=datetime(
-            year, data[9], data[10], data[11], data[12], data[13]
-        ),
-        pulse=decode_sfloat(data, 14),
-        user_id=data[16],
-        status=int.from_bytes(data[17:19], "little"),
+        flags=flags,
+        systolic=systolic,
+        diastolic=diastolic,
+        mean_arterial=mean_arterial,
+        timestamp=timestamp,
+        pulse=pulse,
+        user_id=user_id,
+        status=status,
         raw=bytes(data),
     )
 
