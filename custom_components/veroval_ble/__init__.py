@@ -31,13 +31,40 @@ def _entry_address(entry: ConfigEntry) -> str:
     return unique_id.rsplit("_", 1)[0]
 
 
+def _other_entries_for_address(
+    hass: HomeAssistant, entry: ConfigEntry, address: str
+) -> list[ConfigEntry]:
+    """Config entries that share *address* besides *entry*."""
+    return [
+        other
+        for other in hass.config_entries.async_entries(DOMAIN)
+        if other.entry_id != entry.entry_id
+        and _entry_address(other).lower() == address
+    ]
+
+
+def _device_data_for_address(
+    hass: HomeAssistant, address: str
+) -> VerovalBleDeviceData:
+    """Return the shared GATT dump state for one cuff MAC."""
+    domain_data: dict[str, VerovalBleDeviceData] = hass.data.setdefault(
+        DOMAIN, {}
+    )
+    key = address.lower()
+    device_data = domain_data.get(key)
+    if device_data is None:
+        device_data = VerovalBleDeviceData()
+        domain_data[key] = device_data
+    return device_data
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -> bool:
     """Set up Veroval BLE from a config entry."""
     address = _entry_address(entry)
     cuff_user = int(entry.data[CONF_CUFF_USER])
     _LOGGER.info("Setting up BPU26 %s User %s", address, cuff_user)
 
-    device_data = VerovalBleDeviceData()
+    device_data = _device_data_for_address(hass, address)
     coordinator = VerovalBleCoordinator(
         hass,
         address=address,
@@ -56,18 +83,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -
 
 async def async_unload_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unload_ok:
+        return False
+
+    address = _entry_address(entry).lower()
+    if not _other_entries_for_address(hass, entry, address):
+        domain_data = hass.data.get(DOMAIN)
+        if isinstance(domain_data, dict):
+            domain_data.pop(address, None)
+            if not domain_data:
+                hass.data.pop(DOMAIN, None)
+    return True
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Remove the host BlueZ bond when the last entry for this cuff is deleted."""
     address = _entry_address(entry).lower()
-    remaining = [
-        other
-        for other in hass.config_entries.async_entries(DOMAIN)
-        if other.entry_id != entry.entry_id
-        and _entry_address(other).lower() == address
-    ]
+    remaining = _other_entries_for_address(hass, entry, address)
     if remaining:
         _LOGGER.debug(
             "Keeping BlueZ bond for %s; %s other Veroval entry(ies) remain",
