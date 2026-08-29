@@ -81,7 +81,8 @@ def copy_changed(src_root: Path, dest_root: Path) -> list[str]:
     """Copy files that are new or differ. Returns relative paths that were written."""
     if not src_root.is_dir():
         raise FileNotFoundError(f"Source not found: {src_root}")
-    dest_root.mkdir(parents=True, exist_ok=True)
+    if not dest_root.is_dir():
+        raise FileNotFoundError(f"Destination does not exist: {dest_root}")
 
     copied: list[str] = []
     for src in src_root.rglob("*"):
@@ -205,8 +206,9 @@ class DeployApp(tk.Tk):
     def _on_deploy(self) -> None:
         if self._busy:
             return
-        dest = Path(self._path.get().strip())
-        if not dest.drive and not dest.exists():
+        raw = self._path.get().strip()
+        dest = Path(raw)
+        if not raw or not dest.is_dir():
             self._append(f"Destination does not exist: {dest}")
             return
         self._busy = True
