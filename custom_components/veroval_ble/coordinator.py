@@ -69,16 +69,15 @@ class VerovalBleDeviceData:
         another connect). Pass *cuff_user* so the other slot can consume the
         shared dump without a second connection.
         """
-        if self._polled_this_window:
-            polled_at = self._window_polled_at
-            if (
-                polled_at is not None
-                and self._monotonic() - polled_at >= POLL_WINDOW_GAP_SECONDS
-            ):
-                self._polled_this_window = False
-                self._window_polled_at = None
-                self._window_records = None
-                self._consumed_slots.clear()
+        polled_at = self._window_polled_at
+        if (
+            polled_at is not None
+            and self._monotonic() - polled_at >= POLL_WINDOW_GAP_SECONDS
+        ):
+            self._polled_this_window = False
+            self._window_polled_at = None
+            self._window_records = None
+            self._consumed_slots.clear()
 
         if self._poll_lock.locked():
             return False
@@ -108,7 +107,8 @@ class VerovalBleDeviceData:
         if self._poll_lock.locked():
             return
         self._polled_this_window = False
-        self._window_polled_at = None
+        if self._window_records is None:
+            self._window_polled_at = None
 
     def _mark_polled_this_window(self) -> None:
         self._polled_this_window = True
