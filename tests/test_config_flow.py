@@ -1,0 +1,242 @@
+"""Unit tests for discovery unique_id handling (no Home Assistant install)."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
+_ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "veroval_ble"
+_PKG = "veroval_ble_cf"
+ADDRESS = "aa:bb:cc:dd:ee:ff"
+ADDRESS_UPPER = "AA:BB:CC:DD:EE:FF"
+
+
+class AbortFlow(Exception):
+    """Stand-in for homeassistant.data_entry_flow.AbortFlow."""
+
+    def __init__(
+        self, reason: str, description_placeholders: dict | None = None
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.description_placeholders = description_placeholders
+
+
+class _StubConfigFlow:
+    """Minimal ConfigFlow: records unique_id and aborts on a matching entry."""
+
+    def __init_subclass__(cls, domain=None, **kwargs):  # type: ignore[no-untyped-def]
+        super().__init_subclass__(**kwargs)
+
+    async def async_set_unique_id(
+        self, unique_id: str | None, raise_on_progress: bool = True
+    ) -> None:
+        if not hasattr(self, "context") or self.context is None:
+            self.context = {}
+        self.context["unique_id"] = unique_id
+
+    @property
+    def unique_id(self) -> str | None:
+        return getattr(self, "context", {}).get("unique_id")
+
+    def _async_current_entries(self, include_ignore: bool | None = None) -> list:
+        return list(getattr(self, "_entries", []))
+
+    def _abort_if_unique_id_configured(self) -> None:
+        uid = self.unique_id
+        if uid is None:
+            return
+        for entry in self._async_current_entries():
+            if entry.unique_id == uid:
+                raise AbortFlow("already_configured")
+
+    def async_abort(
+        self, reason: str, description_placeholders: dict | None = None
+    ) -> dict:
+        return {
+            "type": "abort",
+            "reason": reason,
+            "description_placeholders": description_placeholders,
+        }
+
+    def async_show_form(
+        self,
+        step_id: str,
+        data_schema=None,  # noqa: ANN001
+        errors: dict | None = None,
+        description_placeholders: dict | None = None,
+    ) -> dict:
+        return {"type": "form", "step_id": step_id, "errors": errors or {}}
+
+    def _set_confirm_only(self) -> None:
+        return None
+
+
+def _install_stubs() -> None:
+    if "homeassistant.config_entries" in sys.modules:
+        return
+
+    vol = ModuleType("voluptuous")
+    vol.Schema = lambda *a, **k: object()  # type: ignore[attr-defined]
+    vol.Required = lambda x, *a, **k: x  # type: ignore[attr-defined]
+    vol.Optional = lambda x, *a, **k: x  # type: ignore[attr-defined]
+    vol.In = lambda x: x  # type: ignore[attr-defined]
+    sys.modules["voluptuous"] = vol
+
+    ha = ModuleType("homeassistant")
+    ha_components = ModuleType("homeassistant.components")
+    ha_bt = ModuleType("homeassistant.components.bluetooth")
+    ha_ce = ModuleType("homeassistant.config_entries")
+    ha_const = ModuleType("homeassistant.const")
+    ha_core = ModuleType("homeassistant.core")
+
+    ha_bt.BluetoothChange = type("BluetoothChange", (), {})
+    ha_bt.BluetoothScanningMode = SimpleNamespace(ACTIVE="active")
+    ha_bt.BluetoothServiceInfoBleak = type("BluetoothServiceInfoBleak", (), {})
+    ha_bt.async_ble_device_from_address = lambda *a, **k: None
+    ha_bt.async_discovered_service_info = lambda *a, **k: []
+    ha_bt.async_register_callback = lambda *a, **k: lambda: None
+
+    ha_ce.ConfigFlow = _StubConfigFlow
+    ha_ce.ConfigFlowResult = dict
+    ha_ce.AbortFlow = AbortFlow
+
+    ha_const.CONF_ADDRESS = "address"
+    ha_core.callback = lambda fn: fn
+
+    sys.modules["homeassistant"] = ha
+    sys.modules["homeassistant.components"] = ha_components
+    sys.modules["homeassistant.components.bluetooth"] = ha_bt
+    sys.modules["homeassistant.config_entries"] = ha_ce
+    sys.modules["homeassistant.const"] = ha_const
+    sys.modules["homeassistant.core"] = ha_core
+
+
+def _load_config_flow() -> ModuleType:
+    _install_stubs()
+    if _PKG not in sys.modules:
+        pkg = ModuleType(_PKG)
+        pkg.__path__ = [str(_ROOT)]  # type: ignore[attr-defined]
+        sys.modules[_PKG] = pkg
+    full = f"{_PKG}.config_flow"
+    if full in sys.modules:
+        return sys.modules[full]
+    spec = importlib.util.spec_from_file_location(full, _ROOT / "config_flow.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[full] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_cf = _load_config_flow()
+VerovalBleConfigFlow = _cf.VerovalBleConfigFlow
+CONF_CUFF_USER = "cuff_user"
+CONF_ADDRESS = "address"
+
+
+def _discovery() -> SimpleNamespace:
+    return SimpleNamespace(
+        name="BPU26",
+        address=ADDRESS_UPPER,
+        manufacturer_data={},
+        device=None,
+        time=None,
+    )
+
+
+def _slot_entry(cuff_user: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        unique_id=f"{ADDRESS}_{cuff_user}",
+        data={CONF_ADDRESS: ADDRESS, CONF_CUFF_USER: cuff_user},
+    )
+
+
+def _ignore_mac_entry() -> SimpleNamespace:
+    return SimpleNamespace(unique_id=ADDRESS, data={})
+
+
+def _flow(entries: list[SimpleNamespace]) -> VerovalBleConfigFlow:
+    flow = VerovalBleConfigFlow()
+    flow.context = {}
+    flow._entries = entries  # type: ignore[attr-defined]
+    return flow
+
+
+def _abort_reason(result_or_exc: object) -> str:
+    if isinstance(result_or_exc, AbortFlow):
+        return result_or_exc.reason
+    assert isinstance(result_or_exc, dict)
+    return str(result_or_exc["reason"])
+
+
+def test_bluetooth_both_slots_binds_slot_unique_id_not_mac() -> None:
+    """Fully configured cuff: unique_id is address_1 so HA treats it as handled."""
+    flow = _flow([_slot_entry(1), _slot_entry(2)])
+
+    async def _run() -> object:
+        try:
+            return await flow.async_step_bluetooth(_discovery())
+        except AbortFlow as err:
+            return err
+
+    outcome = asyncio.run(_run())
+    assert _abort_reason(outcome) == "already_configured"
+    assert flow.unique_id == f"{ADDRESS}_1"
+    assert flow.unique_id != ADDRESS
+
+
+def test_bluetooth_one_slot_uses_mac_and_does_not_abort() -> None:
+    """User 1 exists: MAC is a temporary flow id so User 2 can still be added."""
+    flow = _flow([_slot_entry(1), _ignore_mac_entry()])
+
+    result = asyncio.run(flow.async_step_bluetooth(_discovery()))
+    assert flow.unique_id == ADDRESS
+    assert result["type"] == "form"
+    assert result["step_id"] == "bluetooth_confirm"
+
+
+def test_bluetooth_zero_slots_honors_ignore_mac() -> None:
+    """First-time Ignore keyed by MAC still aborts discovery."""
+    flow = _flow([_ignore_mac_entry()])
+
+    async def _run() -> object:
+        try:
+            return await flow.async_step_bluetooth(_discovery())
+        except AbortFlow as err:
+            return err
+
+    outcome = asyncio.run(_run())
+    assert _abort_reason(outcome) == "already_configured"
+    assert flow.unique_id == ADDRESS
+
+
+def test_bluetooth_zero_slots_uses_mac() -> None:
+    flow = _flow([])
+    result = asyncio.run(flow.async_step_bluetooth(_discovery()))
+    assert flow.unique_id == ADDRESS
+    assert result["type"] == "form"
+    assert result["step_id"] == "bluetooth_confirm"
+
+
+def test_choose_address_both_slots_aborts_without_mac_unique_id() -> None:
+    flow = _flow([_slot_entry(1), _slot_entry(2)])
+    result = asyncio.run(flow._async_choose_address(ADDRESS))
+    assert result["type"] == "abort"
+    assert result["reason"] == "already_configured"
+    assert flow.unique_id is None
+
+
+def test_choose_address_one_slot_sets_mac_then_pairs() -> None:
+    flow = _flow([_slot_entry(1)])
+
+    async def _fake_pairing() -> dict:
+        return {"type": "form", "step_id": "pairing"}
+
+    flow.async_step_pairing = _fake_pairing  # type: ignore[method-assign]
+    result = asyncio.run(flow._async_choose_address(ADDRESS))
+    assert flow.unique_id == ADDRESS
+    assert result["step_id"] == "pairing"
