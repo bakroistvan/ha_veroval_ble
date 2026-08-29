@@ -370,8 +370,59 @@ def test_needs_poll_passes_cuff_user() -> None:
     data.poll_needed = tracking_poll_needed  # type: ignore[method-assign]
     coord = _make_coordinator(data, CUFF_USER_2)
     coord.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    previous = _coordinator.async_ble_device_from_address
     _coordinator.async_ble_device_from_address = lambda *args, **kwargs: object()
+    try:
+        service_info = SimpleNamespace(device=_FakeBleDevice())
+        assert coord._async_needs_poll(service_info, None) is True
+        assert seen == [CUFF_USER_2]
+    finally:
+        _coordinator.async_ble_device_from_address = previous
 
-    service_info = SimpleNamespace(device=_FakeBleDevice())
-    assert coord._async_needs_poll(service_info, None) is True
-    assert seen == [CUFF_USER_2]
+
+def test_window_end_allows_new_dump_and_clears_cache() -> None:
+    """Consumed slots must not block the next advertise window forever."""
+    data = VerovalBleDeviceData()
+    first_user1 = _measurement(
+        user_id=BLE_USER_1,
+        timestamp=datetime(2024, 1, 15, 12, 0, 0),
+        systolic=120.0,
+    )
+    first_user2 = _measurement(
+        user_id=BLE_USER_2,
+        timestamp=datetime(2024, 1, 14, 9, 30, 0),
+        systolic=130.0,
+    )
+    second_user1 = _measurement(
+        user_id=BLE_USER_1,
+        timestamp=datetime(2024, 1, 16, 8, 0, 0),
+        systolic=122.0,
+    )
+    dumps = [
+        [first_user1, first_user2],
+        [second_user1],
+    ]
+    calls = {"n": 0}
+
+    async def fake_dump(_ble_device: object, cuff_user: int) -> object:
+        records = dumps[min(calls["n"], len(dumps) - 1)]
+        calls["n"] += 1
+        return _dump_result(records, cuff_user)
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> object:
+        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+        await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
+        data.mark_window_ended()
+        assert data.poll_needed(object(), None) is True
+        assert data.poll_needed(object(), None, CUFF_USER_1) is True
+        return await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+
+    published = asyncio.run(run())
+    assert calls["n"] == 2
+    assert published is second_user1
+    assert data.last_measurement[CUFF_USER_1] is second_user1
+    assert data.last_measurement[CUFF_USER_2] is first_user2
+    assert data._window_records == [second_user1]
+    assert data._consumed_slots == {CUFF_USER_1}
