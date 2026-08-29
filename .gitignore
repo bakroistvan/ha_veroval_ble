@@ -22,3 +22,6 @@ docs/captures/ground_truth_*.md
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Local HAOS deploy GUI settings (dest path, SSH host)
+scripts/deploy_haos.local.json
