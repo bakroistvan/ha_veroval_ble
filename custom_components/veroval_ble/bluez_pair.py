@@ -320,7 +320,7 @@ def _build_passkey_agent(session: BlueZPairSession) -> Any:
 
         @dbus_method()
         def DisplayPinCode(self, device: "o", pincode: "s"):
-            _LOGGER.debug("DisplayPinCode %s %s", device, pincode)
+            _LOGGER.debug("DisplayPinCode %s", device)
 
         @dbus_method()
         async def RequestPasskey(self, device: "o") -> "u":
@@ -328,16 +328,13 @@ def _build_passkey_agent(session: BlueZPairSession) -> Any:
 
         @dbus_method()
         def DisplayPasskey(self, device: "o", passkey: "u", entered: "q"):
-            _LOGGER.debug(
-                "DisplayPasskey %s %06u entered=%s", device, passkey, entered
-            )
+            _LOGGER.debug("DisplayPasskey %s entered=%s", device, entered)
 
         @dbus_method()
         def RequestConfirmation(self, device: "o", passkey: "u"):
             _LOGGER.warning(
-                "Unexpected RequestConfirmation for %s (%06u); rejecting",
+                "Unexpected RequestConfirmation for %s; rejecting",
                 device,
-                passkey,
             )
             raise DBusError(
                 "org.bluez.Error.Rejected",

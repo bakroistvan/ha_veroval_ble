@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
+
+import pytest
 
 _PATH = (
     Path(__file__).resolve().parents[1]
@@ -76,3 +79,33 @@ def test_format_device_snapshot_unwraps_variants() -> None:
     assert "Connected=True" in snapshot
     assert "RSSI=-67" in snapshot
     assert "UUIDs" not in snapshot
+
+
+def test_display_passkey_and_pin_code_do_not_log_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DisplayPasskey / DisplayPinCode must not write the pairing secret to logs."""
+    pytest.importorskip("dbus_fast")
+    from dbus_fast import DBusError
+
+    session = _bluez_pair.BlueZPairSession("aa:bb:cc:dd:ee:ff")
+    agent = _bluez_pair._build_passkey_agent(session)
+    device = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
+    # Distinctive 6-digit pairing secret used only as a method argument.
+    secret = "246813"
+    entered = 4
+
+    with caplog.at_level(logging.DEBUG, logger="veroval_ble_bluez_pair"):
+        agent.DisplayPasskey(device, int(secret), entered)
+        agent.DisplayPinCode(device, secret)
+        try:
+            agent.RequestConfirmation(device, int(secret))
+        except DBusError:
+            pass
+
+    leaked = secret in caplog.text
+    assert leaked is False
+    assert "DisplayPasskey" in caplog.text
+    assert f"entered={entered}" in caplog.text
+    assert "DisplayPinCode" in caplog.text
+    assert "RequestConfirmation" in caplog.text
