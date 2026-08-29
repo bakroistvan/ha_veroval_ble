@@ -1,0 +1,4 @@
+{
+  "name": "Veroval BLE",
+  "install": "python3 -m pip install --user -r requirements-dev.txt -r requirements-hil.txt"
+}
