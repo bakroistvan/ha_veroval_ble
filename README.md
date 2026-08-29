@@ -59,7 +59,7 @@ Then run setup again (already-paired cuffs skip the PIN step).
 3. Enter the cuff PIN when the UI asks (host adapter only).
 4. Select **User 1** or **User 2** — the slot whose latest reading this config entry will publish.
 
-Sensors belong to **that slot only**. A second person can add the same cuff again and choose the other user (already paired — no PIN again).
+Sensors belong to **that slot only**. A second person can add the same cuff again and choose the other user (already paired — no PIN again). Each slot is a **separate Home Assistant device** (`BPU26 User 1` / `BPU26 User 2`). If an older version merged both slots into one device, delete that device and reload the integration.
 
 Each sync **drains** the BLE history dump, then publishes the record with the **newest timestamp for the selected slot** — not the first packet.
 
