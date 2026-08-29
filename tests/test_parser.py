@@ -79,6 +79,53 @@ def _bpm_payload(
     )
 
 
+_FLAG_KPA = 0x01
+_FLAG_TIMESTAMP = 0x02
+_FLAG_PULSE = 0x04
+_FLAG_USER_ID = 0x08
+_FLAG_STATUS = 0x10
+_KPA_TO_MMHG = 760 / 101.325
+_DEFAULT_TS = datetime(2024, 1, 15, 12, 0, 0)
+
+
+def _bpm_payload_from_flags(
+    flags: int,
+    *,
+    systolic: int = 120,
+    diastolic: int = 80,
+    map_value: int = 0,
+    timestamp: datetime = _DEFAULT_TS,
+    pulse: int = 72,
+    user_id: int = 0,
+    status: int = 0,
+) -> bytes:
+    """Build a BPM indication including only fields whose flag bits are set."""
+    parts = bytearray([flags])
+    parts.extend(_sfloat_le(systolic))
+    parts.extend(_sfloat_le(diastolic))
+    parts.extend(_sfloat_le(map_value))
+    if flags & _FLAG_TIMESTAMP:
+        parts.extend(timestamp.year.to_bytes(2, "little"))
+        parts.extend(
+            bytes(
+                [
+                    timestamp.month,
+                    timestamp.day,
+                    timestamp.hour,
+                    timestamp.minute,
+                    timestamp.second,
+                ]
+            )
+        )
+    if flags & _FLAG_PULSE:
+        parts.extend(_sfloat_le(pulse))
+    if flags & _FLAG_USER_ID:
+        parts.append(user_id)
+    if flags & _FLAG_STATUS:
+        parts.extend(status.to_bytes(2, "little"))
+    return bytes(parts)
+
+
 def test_capture_fixture_120_80_72() -> None:
     m = parse_bpm_indication(CAPTURE_FIXTURE)
     assert m.flags == 0x1E
@@ -130,6 +177,85 @@ def test_parse_bpm_indication_too_short() -> None:
         parse_bpm_indication(CAPTURE_FIXTURE[:-1])
     with pytest.raises(ValueError):
         parse_bpm_indication(b"")
+
+
+def test_parse_bpm_kpa_converts_pressure_not_pulse() -> None:
+    payload = _bpm_payload_from_flags(
+        0x1E | _FLAG_KPA,
+        systolic=16,
+        diastolic=10,
+        map_value=12,
+        pulse=72,
+        user_id=BLE_USER_1,
+        status=0,
+    )
+    m = parse_bpm_indication(payload)
+    assert m.flags == 0x1F
+    assert m.systolic == pytest.approx(16 * _KPA_TO_MMHG)
+    assert m.diastolic == pytest.approx(10 * _KPA_TO_MMHG)
+    assert m.mean_arterial == pytest.approx(12 * _KPA_TO_MMHG)
+    assert m.pulse == 72.0
+    assert m.timestamp == _DEFAULT_TS
+    assert m.user_id == BLE_USER_1
+    assert m.status == 0
+
+
+def test_parse_bpm_missing_timestamp_raises() -> None:
+    payload = _bpm_payload_from_flags(0x1C)
+    with pytest.raises(ValueError):
+        parse_bpm_indication(payload)
+
+
+def test_parse_bpm_missing_user_id_raises() -> None:
+    payload = _bpm_payload_from_flags(0x16)
+    with pytest.raises(ValueError):
+        parse_bpm_indication(payload)
+
+
+def test_parse_bpm_missing_pulse_is_nan() -> None:
+    payload = _bpm_payload_from_flags(0x1A, user_id=BLE_USER_2, status=0)
+    m = parse_bpm_indication(payload)
+    assert isnan(m.pulse)
+    assert m.flags == 0x1A
+    assert m.systolic == 120.0
+    assert m.diastolic == 80.0
+    assert m.timestamp == _DEFAULT_TS
+    assert m.user_id == BLE_USER_2
+    assert m.status == 0
+
+
+def test_parse_bpm_missing_status_defaults_to_zero() -> None:
+    payload = _bpm_payload_from_flags(0x0E, user_id=BLE_USER_1)
+    m = parse_bpm_indication(payload)
+    assert m.status == 0
+    assert m.irregular_pulse is False
+    assert m.flags == 0x0E
+    assert m.pulse == 72.0
+    assert m.user_id == BLE_USER_1
+    assert m.timestamp == _DEFAULT_TS
+
+
+def test_parse_bpm_flags_zero_seven_bytes_raises() -> None:
+    payload = _bpm_payload_from_flags(0x00)
+    assert len(payload) == 7
+    with pytest.raises(ValueError):
+        parse_bpm_indication(payload)
+
+
+def test_parse_bpm_truncated_mid_field() -> None:
+    full = _bpm_payload_from_flags(0x1E)
+    # Timestamp starts at offset 7 (7 octets); cut inside it.
+    with pytest.raises(ValueError):
+        parse_bpm_indication(full[:10])
+    # Pulse is 2 octets after timestamp (offset 14); leave one byte.
+    with pytest.raises(ValueError):
+        parse_bpm_indication(full[:15])
+    # User ID is 1 octet at offset 16.
+    with pytest.raises(ValueError):
+        parse_bpm_indication(full[:16])
+    # Status is 2 octets at offset 17; leave one byte (same as fixture[:-1]).
+    with pytest.raises(ValueError):
+        parse_bpm_indication(full[:18])
 
 
 def test_select_latest_for_user_first_packet_is_not_user_2() -> None:
