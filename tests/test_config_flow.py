@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import sys
+import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -162,8 +163,48 @@ def _ignore_mac_entry() -> SimpleNamespace:
 def _flow(entries: list[SimpleNamespace]) -> VerovalBleConfigFlow:
     flow = VerovalBleConfigFlow()
     flow.context = {}
+    flow.hass = object()  # type: ignore[attr-defined]
     flow._entries = entries  # type: ignore[attr-defined]
     return flow
+
+
+def _ha_bt():
+    return sys.modules["homeassistant.components.bluetooth"]
+
+
+def _set_discovered(infos: list) -> None:
+    _ha_bt().async_discovered_service_info = lambda *a, **k: list(infos)
+
+
+def _host_device(path: str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"):
+    return SimpleNamespace(details={"path": path, "props": {"Address": ADDRESS_UPPER}})
+
+
+def _proxy_device():
+    return SimpleNamespace(details={"source": "kitchen-ble-proxy"})
+
+
+def _host_discovery(*, fresh: bool = True) -> SimpleNamespace:
+    ad_time = time.monotonic() if fresh else time.monotonic() - 120
+    return SimpleNamespace(
+        name="BPU26",
+        address=ADDRESS_UPPER,
+        manufacturer_data={},
+        device=_host_device(),
+        time=ad_time,
+        source="00:1a:7d:da:71:13",
+    )
+
+
+def _proxy_discovery() -> SimpleNamespace:
+    return SimpleNamespace(
+        name="BPU26",
+        address=ADDRESS_UPPER,
+        manufacturer_data={},
+        device=_proxy_device(),
+        time=time.monotonic(),
+        source="kitchen-ble-proxy",
+    )
 
 
 def _abort_reason(result_or_exc: object) -> str:
@@ -240,3 +281,137 @@ def test_choose_address_one_slot_sets_mac_then_pairs() -> None:
     result = asyncio.run(flow._async_choose_address(ADDRESS))
     assert flow.unique_id == ADDRESS
     assert result["step_id"] == "pairing"
+
+
+def test_bluetooth_confirm_proxy_only_aborts_without_scan() -> None:
+    """Add on a proxy-only Discovered card must not start the 60s host scan."""
+    flow = _flow([])
+    scanned = False
+
+    async def _fake_scan() -> dict:
+        nonlocal scanned
+        scanned = True
+        return {"type": "progress", "step_id": "scan"}
+
+    async def _fake_pairing() -> dict:
+        return {"type": "form", "step_id": "pairing"}
+
+    flow.async_step_scan = _fake_scan  # type: ignore[method-assign]
+    flow.async_step_pairing = _fake_pairing  # type: ignore[method-assign]
+
+    async def _run() -> dict:
+        await flow.async_step_bluetooth(_proxy_discovery())
+        return await flow.async_step_bluetooth_confirm({})
+
+    result = asyncio.run(_run())
+    assert result["type"] == "abort"
+    assert result["reason"] == "proxy_not_supported"
+    assert scanned is False
+
+
+def test_scan_only_proxy_ads_aborts_proxy_not_supported() -> None:
+    _set_discovered([_proxy_discovery()])
+    try:
+        flow = _flow([])
+        result = asyncio.run(flow._async_next_after_scan())
+        assert result["type"] == "abort"
+        assert result["reason"] == "proxy_not_supported"
+    finally:
+        _set_discovered([])
+
+
+def test_scan_no_ads_is_not_found() -> None:
+    _set_discovered([])
+    flow = _flow([])
+    result = asyncio.run(flow._async_next_after_scan())
+    assert result["type"] == "form"
+    assert result["step_id"] == "not_found"
+
+
+def test_bluetooth_confirm_host_fresh_goes_to_pairing() -> None:
+    flow = _flow([])
+
+    async def _fake_pairing() -> dict:
+        return {"type": "form", "step_id": "pairing"}
+
+    async def _fake_scan() -> dict:
+        raise AssertionError("should not scan for a fresh host advertisement")
+
+    flow.async_step_pairing = _fake_pairing  # type: ignore[method-assign]
+    flow.async_step_scan = _fake_scan  # type: ignore[method-assign]
+
+    async def _run() -> dict:
+        await flow.async_step_bluetooth(_host_discovery(fresh=True))
+        return await flow.async_step_bluetooth_confirm({})
+
+    result = asyncio.run(_run())
+    assert result["step_id"] == "pairing"
+
+
+def test_bluetooth_confirm_stale_host_scans() -> None:
+    flow = _flow([])
+    scanned = False
+
+    async def _fake_scan() -> dict:
+        nonlocal scanned
+        scanned = True
+        return {"type": "progress", "step_id": "scan"}
+
+    flow.async_step_scan = _fake_scan  # type: ignore[method-assign]
+
+    async def _run() -> dict:
+        await flow.async_step_bluetooth(_host_discovery(fresh=False))
+        return await flow.async_step_bluetooth_confirm({})
+
+    result = asyncio.run(_run())
+    assert scanned is True
+    assert result["step_id"] == "scan"
+
+
+def test_is_fresh_advertisement_missing_time_is_stale() -> None:
+    assert _cf._is_fresh_advertisement(SimpleNamespace(time=None)) is False
+    assert _cf._is_fresh_advertisement(SimpleNamespace()) is False
+    assert _cf._is_fresh_advertisement(SimpleNamespace(time="now")) is False
+    stale = SimpleNamespace(time=time.monotonic() - 120)
+    assert _cf._is_fresh_advertisement(stale) is False
+    fresh = SimpleNamespace(time=time.monotonic())
+    assert _cf._is_fresh_advertisement(fresh) is True
+
+
+def test_is_local_bluez_device_path_vs_empty_or_proxy() -> None:
+    assert (
+        _cf.is_local_bluez_device(
+            SimpleNamespace(details={"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"})
+        )
+        is True
+    )
+    assert _cf.is_local_bluez_device(SimpleNamespace(details={})) is False
+    assert _cf.is_local_bluez_device(SimpleNamespace(details=None)) is False
+    assert (
+        _cf.is_local_bluez_device(
+            SimpleNamespace(details={"source": "kitchen-ble-proxy"})
+        )
+        is False
+    )
+
+
+def test_choose_address_proxy_only_aborts() -> None:
+    flow = _flow([])
+    flow._proxy_devices[ADDRESS] = _proxy_discovery()
+    result = asyncio.run(flow._async_choose_address(ADDRESS))
+    assert result["type"] == "abort"
+    assert result["reason"] == "proxy_not_supported"
+
+
+def test_host_adapter_source_fallback_without_path() -> None:
+    host = SimpleNamespace(
+        device=SimpleNamespace(details={}),
+        source="00:1A:7D:DA:71:13",
+    )
+    assert _cf._is_host_adapter_advertisement(host) is True
+    proxy = SimpleNamespace(
+        device=SimpleNamespace(details={}),
+        source="kitchen-ble-proxy",
+    )
+    assert _cf._is_host_adapter_advertisement(proxy) is False
+    assert _cf._is_proxy_advertisement(proxy) is True
