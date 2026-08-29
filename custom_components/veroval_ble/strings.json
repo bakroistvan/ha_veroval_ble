@@ -86,6 +86,9 @@
       },
       "rssi": {
         "name": "RSSI"
+      },
+      "last_synchronized": {
+        "name": "Last synchronized"
       }
     },
     "binary_sensor": {

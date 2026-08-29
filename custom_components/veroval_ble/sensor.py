@@ -105,6 +105,14 @@ RSSI_DESCRIPTION = SensorEntityDescription(
     entity_registry_enabled_default=False,
 )
 
+LAST_SYNCHRONIZED_DESCRIPTION = SensorEntityDescription(
+    key="last_synchronized",
+    translation_key="last_synchronized",
+    device_class=SensorDeviceClass.TIMESTAMP,
+    entity_category=EntityCategory.DIAGNOSTIC,
+    icon="mdi:sync",
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -121,6 +129,9 @@ async def async_setup_entry(
             ),
             VerovalBleUserSlotSensor(coordinator, USER_SLOT_DESCRIPTION),
             VerovalBleRssiSensor(coordinator, RSSI_DESCRIPTION),
+            VerovalBleLastSynchronizedSensor(
+                coordinator, LAST_SYNCHRONIZED_DESCRIPTION
+            ),
         ]
     )
 
@@ -169,3 +180,17 @@ class VerovalBleRssiSensor(VerovalBleEntity, SensorEntity):
     def native_value(self) -> int | None:
         """Return last advertisement RSSI."""
         return self.coordinator.rssi
+
+
+class VerovalBleLastSynchronizedSensor(VerovalBleEntity, SensorEntity):
+    """Home Assistant wall clock of the last successful dump for this slot."""
+
+    @property
+    def available(self) -> bool:
+        """Available after at least one successful dump for this slot."""
+        return self.coordinator.last_synchronized is not None
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return when this slot last consumed a GATT dump."""
+        return self.coordinator.last_synchronized

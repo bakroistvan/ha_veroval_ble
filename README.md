@@ -73,6 +73,7 @@ Each sync **drains** the BLE history dump, then publishes the record with the **
 | Diastolic | mmHg |
 | Pulse | bpm |
 | Measured time | Cuff timestamp of the published reading |
+| Last synchronized | Home Assistant time of the last successful dump for this slot |
 | User slot | Label **User 1** / **User 2** |
 | Irregular pulse | Binary sensor (not atrial fibrillation) |
 
