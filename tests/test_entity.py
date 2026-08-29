@@ -35,6 +35,9 @@ def _stub_homeassistant() -> None:
     entity_mod.EntityDescription = EntityDescription
 
     class CoordinatorEntity:
+        def __class_getitem__(cls, _item: object) -> type:
+            return cls
+
         def __init__(self, coordinator: object) -> None:
             self.coordinator = coordinator
 
