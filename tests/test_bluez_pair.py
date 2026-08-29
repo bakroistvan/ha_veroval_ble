@@ -105,6 +105,18 @@ def test_provide_passkey_cancelled_future_fails() -> None:
     asyncio.run(_run())
 
 
+def test_provide_passkey_exception_future_does_not_hide_failure() -> None:
+    async def _run() -> None:
+        session = BlueZPairSession("aa:bb:cc:dd:ee:ff")
+        future = asyncio.get_running_loop().create_future()
+        future.set_exception(RuntimeError("prior pairing failure"))
+        session._passkey_future = future
+        with pytest.raises(PairingFailedError, match="prior pairing failure"):
+            session.provide_passkey("123456")
+
+    asyncio.run(_run())
+
+
 def test_wait_for_passkey_or_done_does_not_leave_pending_cancelled_waiter() -> None:
     async def _run() -> None:
         session = BlueZPairSession("aa:bb:cc:dd:ee:ff")

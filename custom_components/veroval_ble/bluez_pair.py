@@ -410,6 +410,10 @@ class BlueZPairSession:
         if future is None or future.cancelled():
             raise PairingFailedError("No passkey request is pending")
         if future.done():
+            # done() is also True when set_exception() was used; do not hide that.
+            exc = future.exception()
+            if exc is not None:
+                raise PairingFailedError(str(exc)) from exc
             return
         _LOGGER.debug(
             "Passkey provided for %s (%s digits); PIN value is not logged",
