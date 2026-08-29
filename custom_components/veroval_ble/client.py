@@ -45,7 +45,7 @@ def is_auth_error(err: BaseException) -> bool:
             "notpaired",
             "authentication",
             "encryption",
-            "encrypted",
+            "not encrypted",
             "insufficient authentication",
             "insufficient encryption",
             "not permitted",

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("bleak")
+pytest.importorskip("bleak_retry_connector")
+
 from tests._veroval_loader import load_client_module
 
 _client = load_client_module()
@@ -20,6 +23,8 @@ FALSE_POSITIVES = (
     "Failed to connect: Protocol not available",
     "Device disconnected",
     "Not connected",
+    "already encrypted",
+    "link is already encrypted",
 )
 
 # Missing/broken OS bond and GATT security failures that should still match.
