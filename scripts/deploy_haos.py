@@ -127,6 +127,8 @@ def restart_core(host: str, user: str, port: int) -> str:
         "-o",
         "BatchMode=yes",
         "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
         "ConnectTimeout=10",
         "-p",
         str(port),
@@ -153,9 +155,15 @@ def restart_core(host: str, user: str, port: int) -> str:
     err = (proc.stderr or "").strip()
     if proc.returncode != 0:
         detail = err or out or f"exit {proc.returncode}"
+        hint = ""
+        if "Host key verification failed" in detail:
+            hint = (
+                f"\nIf the HAOS SSH host key changed, remove the old entry:\n"
+                f"  ssh-keygen -R {host}"
+            )
         raise RuntimeError(
             f"SSH restart failed ({target}): {detail}\n"
-            f"Using {SSH_KEY_ENV}={identity}"
+            f"Using {SSH_KEY_ENV}={identity}{hint}"
         )
     return out or "ha core restart requested"
 
