@@ -168,12 +168,8 @@ def _flow(entries: list[SimpleNamespace]) -> VerovalBleConfigFlow:
     return flow
 
 
-def _ha_bt():
-    return sys.modules["homeassistant.components.bluetooth"]
-
-
 def _set_discovered(infos: list) -> None:
-    _ha_bt().async_discovered_service_info = lambda *a, **k: list(infos)
+    _cf.async_discovered_service_info = lambda *a, **k: list(infos)
 
 
 def _host_device(path: str = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"):
