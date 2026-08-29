@@ -141,11 +141,16 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         return None
 
     async def _async_close_pair_session(self) -> None:
-        """Tear down any in-flight BlueZ pairing session."""
+        """Tear down any in-flight BlueZ pairing session.
+
+        Do not clear ``_pair_wait_task`` / ``_pair_finish_task`` here. Those
+        handles belong to the progress steps: Home Assistant re-enters the
+        same step after the background task completes, and must still see
+        the original task. Clearing them causes a second finish task to be
+        started against an already-closed session.
+        """
         session = self._pair_session
         self._pair_session = None
-        self._pair_wait_task = None
-        self._pair_finish_task = None
         if session is not None:
             await session.close()
 
@@ -595,9 +600,12 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _async_run_pair_finish(self) -> None:
         """Background work after the PIN was submitted."""
-        assert self._pair_session is not None
+        session = self._pair_session
+        if session is None:
+            raise PairingFailedError("pairing session was closed")
         try:
-            await self._pair_session.wait_finished()
+            await session.wait_finished()
+            self._pair_outcome = "done"
         except PairingError as err:
             self._record_pairing_error(err, err.reason)
             raise
@@ -613,6 +621,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         """Progress: finish bonding after the PIN was entered."""
         assert self._address is not None
         if self._pair_finish_task is None:
+            if self._pair_outcome == "done":
+                return self.async_show_progress_done(next_step_id="pair_finish_done")
             self._pair_error_reason = None
             self._pair_error_detail = None
             self._pair_finish_task = self.hass.async_create_task(
