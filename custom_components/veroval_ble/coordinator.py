@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from datetime import datetime
 
 from bleak.backends.device import BLEDevice
@@ -21,7 +23,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CoreState, HomeAssistant, callback
 
 from .client import dump_latest
-from .const import UPDATE_INTERVAL
+from .const import POLL_WINDOW_GAP_SECONDS, UPDATE_INTERVAL
 from .parser import BloodPressureMeasurement, cuff_user_to_ble_id
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,12 +42,14 @@ def _address_lock(address: str) -> asyncio.Lock:
 class VerovalBleDeviceData:
     """Connect, drain 0x2A35 indications, select newest record for one BLE user id."""
 
-    def __init__(self) -> None:
+    def __init__(self, monotonic: Callable[[], float] = time.monotonic) -> None:
         """Initialize poll state."""
+        self._monotonic = monotonic
         self._poll_lock = asyncio.Lock()
         self.last_measurement: BloodPressureMeasurement | None = None
         self._last_published_timestamp: datetime | None = None
         self._polled_this_window = False
+        self._window_polled_at: float | None = None
 
     def poll_needed(
         self,
@@ -53,13 +57,32 @@ class VerovalBleDeviceData:
         last_poll: float | None,
     ) -> bool:
         """Return True when an advertisement should trigger a GATT dump."""
+        if self._polled_this_window:
+            polled_at = self._window_polled_at
+            if (
+                polled_at is not None
+                and self._monotonic() - polled_at >= POLL_WINDOW_GAP_SECONDS
+            ):
+                self._polled_this_window = False
+                self._window_polled_at = None
         if self._poll_lock.locked() or self._polled_this_window:
             return False
         return not last_poll or last_poll > UPDATE_INTERVAL
 
     def mark_window_ended(self) -> None:
-        """Allow another dump after the cuff stops advertising."""
+        """Allow another dump after the cuff stops advertising.
+
+        Connecting stops advertisements, so Home Assistant may mark the cuff
+        unavailable while a dump is still running. Ignore that signal.
+        """
+        if self._poll_lock.locked():
+            return
         self._polled_this_window = False
+        self._window_polled_at = None
+
+    def _mark_polled_this_window(self) -> None:
+        self._polled_this_window = True
+        self._window_polled_at = self._monotonic()
 
     async def async_poll(
         self, ble_device: BLEDevice, cuff_user: int
@@ -83,10 +106,10 @@ class VerovalBleDeviceData:
         selected = result.selected
         if selected is None:
             if result.records:
-                self._polled_this_window = True
+                self._mark_polled_this_window()
             return self.last_measurement
 
-        self._polled_this_window = True
+        self._mark_polled_this_window()
 
         if (
             self._last_published_timestamp is not None
