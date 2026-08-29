@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -28,7 +28,6 @@ class VerovalBleEntity(CoordinatorEntity[VerovalBleCoordinator]):
         self._attr_unique_id = f"{address}_{cuff_user}_{description.key}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{address}_{cuff_user}")},
-            connections={(CONNECTION_BLUETOOTH, address)},
             name=f"BPU26 User {cuff_user}",
             manufacturer="PAUL HARTMANN AG",
             model="Veroval compact+ BPU 26",

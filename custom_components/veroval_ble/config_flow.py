@@ -81,7 +81,22 @@ def _normalize_address(value: str) -> str | None:
 
 
 class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Veroval BLE."""
+    """Handle a config flow for Veroval BLE.
+
+    Each cuff user slot is a separate config entry whose unique_id is
+    ``{address}_{cuff_user}`` (for example ``aa:bb:cc:dd:ee:ff_1``). That
+    scheme lets User 1 and User 2 coexist.
+
+    Bluetooth discovery uses the bare MAC only as a temporary flow id so
+    two in-progress discoveries for the same cuff are de-duplicated. The
+    MAC is never the created entry unique_id, so
+    ``_abort_if_unique_id_configured()`` must not run while unique_id is
+    still the MAC when a slot already exists (an Ignore entry keyed by
+    MAC would block adding User 2). When both slots are already
+    configured, discovery binds unique_id to an existing
+    ``{address}_{cuff_user}`` entry instead, so Home Assistant treats the
+    advertisement as already handled.
+    """
 
     VERSION = 1
 
@@ -101,7 +116,11 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._not_found_error: str | None = None
 
     def _configured_slots(self, address: str) -> set[int]:
-        """Return cuff-user slots already set up for this BLE address."""
+        """Return cuff-user slots already set up for this BLE address.
+
+        Ignore entries (no ``cuff_user``) are skipped so a first-time Ignore
+        keyed by MAC is not treated as a configured slot.
+        """
         slots: set[int] = set()
         target = address.lower()
         for entry in self._async_current_entries():
@@ -110,7 +129,10 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
                 entry_address = entry.unique_id.rsplit("_", 1)[0]
             if not entry_address or str(entry_address).lower() != target:
                 continue
-            slots.add(int(entry.data[CONF_CUFF_USER]))
+            cuff_user = entry.data.get(CONF_CUFF_USER)
+            if cuff_user is None:
+                continue
+            slots.add(int(cuff_user))
         return slots
 
     def _available_slots(self, address: str) -> dict[int, str]:
@@ -173,7 +195,14 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
     ) -> ConfigFlowResult:
-        """Handle Bluetooth discovery: confirm the BPU26."""
+        """Handle Bluetooth discovery: confirm the BPU26.
+
+        When both user slots exist, bind unique_id to ``{address}_1`` (an
+        existing entry) and abort so Home Assistant treats rediscovery as
+        already handled. Do not set unique_id to the bare MAC in that
+        case — MAC never matches ``address_cuff_user`` entries, so HA
+        would start a new aborting flow on every advertisement.
+        """
         _LOGGER.debug(
             "Bluetooth discovery %s (%s)",
             discovery_info.name,
@@ -183,9 +212,18 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="not_supported")
 
         address = discovery_info.address.lower()
-        await self.async_set_unique_id(address)
-        if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+        configured = self._configured_slots(address)
+        if configured >= {CUFF_USER_1, CUFF_USER_2}:
+            await self.async_set_unique_id(f"{address}_{CUFF_USER_1}")
+            self._abort_if_unique_id_configured()
             return self.async_abort(reason="already_configured")
+
+        # Temporary flow id. Do not abort-if-configured after MAC when a
+        # slot already exists: an Ignore entry keyed by MAC would block
+        # User 2. With zero slots, honor a first-time Ignore.
+        await self.async_set_unique_id(address)
+        if not configured:
+            self._abort_if_unique_id_configured()
 
         self._discovery_info = discovery_info
         self._address = address
@@ -262,14 +300,18 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         }
 
     async def _async_choose_address(self, address: str) -> ConfigFlowResult:
-        """Continue setup for a discovered or typed BLE address."""
+        """Continue setup for a discovered or typed BLE address.
+
+        If both user slots are taken, abort without setting unique_id to
+        the bare MAC (that id never matches ``address_cuff_user`` entries).
+        """
+        if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+            return self.async_abort(reason="already_configured")
         discovery = self._discovered_devices.get(address)
         self._discovery_info = discovery
         self._address = address
         self._name = (discovery.name if discovery else None) or LOCAL_NAME
         await self.async_set_unique_id(address, raise_on_progress=False)
-        if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
-            return self.async_abort(reason="already_configured")
         _LOGGER.debug("User picked %s (%s)", self._name, address)
         return await self.async_step_pairing()
 
@@ -494,10 +536,14 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
 
     async def _async_run_pair_wait(self) -> str:
         """Background work for the connecting progress step."""
-        assert self._pair_session is not None
-        await self._pair_session.start_pair()
+        session = self._pair_session
+        if session is None:
+            err = PairingFailedError("pairing session was closed")
+            self._record_pairing_error(err)
+            raise err
+        await session.start_pair()
         try:
-            return await self._pair_session.wait_for_passkey_or_done()
+            return await session.wait_for_passkey_or_done()
         except PairingError as err:
             self._record_pairing_error(err, err.reason)
             raise
@@ -510,15 +556,17 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Progress: connecting and waiting for the cuff to show a PIN."""
         assert self._address is not None
-        if self._pair_wait_task is None:
+        first_visit = self._pair_wait_task is None
+        if first_visit:
             self._pair_error_reason = None
             self._pair_error_detail = None
             self._pair_wait_task = self.hass.async_create_task(
                 self._async_run_pair_wait(),
                 f"{DOMAIN}_pair_wait",
+                eager_start=False,
             )
 
-        if not self._pair_wait_task.done():
+        if first_visit or not self._pair_wait_task.done():
             return self.async_show_progress(
                 step_id="pair_wait",
                 progress_action="connecting",
@@ -575,6 +623,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             pin = str(user_input.get(CONF_PIN) or "").strip()
             if not pin.isdigit() or not 4 <= len(pin) <= 6:
                 errors[CONF_PIN] = "invalid_pin"
+            elif self._pair_finish_task is not None or self._pair_outcome == "done":
+                return await self.async_step_pair_finish()
             elif self._pair_session is None:
                 return self._abort_pairing_failed("pairing session was closed")
             else:
@@ -615,22 +665,32 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         finally:
             await self._async_close_pair_session()
 
+    async def _async_pair_finish_noop(self) -> None:
+        """No-op finish task so a second PIN submit still shows progress first."""
+
     async def async_step_pair_finish(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Progress: finish bonding after the PIN was entered."""
         assert self._address is not None
-        if self._pair_finish_task is None:
+        first_visit = self._pair_finish_task is None
+        if first_visit:
             if self._pair_outcome == "done":
-                return self.async_show_progress_done(next_step_id="pair_finish_done")
-            self._pair_error_reason = None
-            self._pair_error_detail = None
-            self._pair_finish_task = self.hass.async_create_task(
-                self._async_run_pair_finish(),
-                f"{DOMAIN}_pair_finish",
-            )
+                self._pair_finish_task = self.hass.async_create_task(
+                    self._async_pair_finish_noop(),
+                    f"{DOMAIN}_pair_finish",
+                    eager_start=False,
+                )
+            else:
+                self._pair_error_reason = None
+                self._pair_error_detail = None
+                self._pair_finish_task = self.hass.async_create_task(
+                    self._async_run_pair_finish(),
+                    f"{DOMAIN}_pair_finish",
+                    eager_start=False,
+                )
 
-        if not self._pair_finish_task.done():
+        if first_visit or not self._pair_finish_task.done():
             return self.async_show_progress(
                 step_id="pair_finish",
                 progress_action="finishing",
@@ -675,7 +735,13 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user_slot(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Required User 1 or User 2 slot. unique_id is address_cuff_user."""
+        """Required User 1 or User 2 slot.
+
+        Entry unique_id is ``{address}_{cuff_user}``.
+        ``_abort_if_unique_id_configured()`` is valid only after unique_id
+        has been set to that slot id, never while it is still the bare
+        MAC (used as a temporary discovery flow id).
+        """
         assert self._address is not None
         address = self._address
         options = self._available_slots(address)

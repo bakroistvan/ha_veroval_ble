@@ -41,12 +41,17 @@ def is_auth_error(err: BaseException) -> bool:
     return any(
         token in text
         for token in (
-            "auth",
-            "pair",
-            "encrypt",
+            "not paired",
+            "notpaired",
+            "authentication",
+            "encryption",
+            "not encrypted",
+            "insufficient authentication",
+            "insufficient encryption",
             "not permitted",
-            "insufficient",
             "not authorized",
+            "notpermitted",
+            "notauthorized",
         )
     )
 
