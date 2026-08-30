@@ -114,6 +114,38 @@ class VerovalBleDeviceData:
         self._grace_elapsed_logged = False
         self._grace_timer: object | None = None
         self._window_skipped = False
+        self.bluez_connected = False
+        self._connected_listeners: list[Callable[[], None]] = []
+
+    def async_add_connected_listener(
+        self, listener: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Notify *listener* when host Connected or an in-progress dump changes."""
+        self._connected_listeners.append(listener)
+
+        def _remove() -> None:
+            try:
+                self._connected_listeners.remove(listener)
+            except ValueError:
+                pass
+
+        return _remove
+
+    def _notify_connected(self) -> None:
+        for listener in list(self._connected_listeners):
+            listener()
+
+    def set_bluez_connected(self, connected: bool) -> None:
+        """Record Device1 Connected from the BlueZ radio watch."""
+        if self.bluez_connected == connected:
+            return
+        self.bluez_connected = connected
+        self._notify_connected()
+
+    @property
+    def is_connected(self) -> bool:
+        """True while the host adapter has a GATT link, or a dump holds the lock."""
+        return self.bluez_connected or self._poll_lock.locked()
 
     def cancel_grace_timer(self) -> None:
         """Cancel the delayed dump that runs when HA sends no further ads."""
@@ -373,7 +405,11 @@ class VerovalBleDeviceData:
         self._window_records = None
         self._consumed_slots.clear()
 
-        result = await dump_latest(ble_device, cuff_user)
+        self._notify_connected()
+        try:
+            result = await dump_latest(ble_device, cuff_user)
+        finally:
+            self._notify_connected()
         if result.auth_error or result.missing_characteristic:
             return self.last_measurement.get(cuff_user)
 
@@ -427,7 +463,6 @@ class VerovalBleCoordinator(
         self.cuff_user = cuff_user
         self.device_data = device_data
         self.rssi: int | None = None
-        self._advertising_timer: object | None = None
         address = normalize_ble_address(address)
         super().__init__(
             hass,
@@ -452,44 +487,13 @@ class VerovalBleCoordinator(
 
     @property
     def is_advertising(self) -> bool:
-        """True while the last live sighting (HA ad or BlueZ RSSI) is still recent.
-
-        Sightings keep arriving while the cuff flashes. After it sleeps, the
-        sensor turns off in ``CUFF_ADVERTISE_SECONDS``, not a full 2 minutes.
-        """
+        """True while the last live sighting (HA ad or BlueZ RSSI) is still recent."""
         return self.device_data.is_advertising()
 
-    def _cancel_advertising_timer(self) -> None:
-        """Cancel the delayed listener refresh that turns advertising off."""
-        handle = self._advertising_timer
-        if handle is None:
-            return
-        cancel = getattr(handle, "cancel", None)
-        if cancel is not None:
-            cancel()
-        self._advertising_timer = None
-
-    def _schedule_advertising_timer(self) -> None:
-        """Refresh entities when the advertising linger after last sighting ends."""
-        self._cancel_advertising_timer()
-        last_live = self.device_data._last_live_ad_time
-        if last_live is None:
-            return
-        delay = (
-            CUFF_ADVERTISE_SECONDS
-            - (self.device_data._monotonic() - last_live)
-            + 0.5
-        )
-        if delay <= 0:
-            self.async_update_listeners()
-            return
-        loop = getattr(self.hass, "loop", None)
-        call_later = getattr(loop, "call_later", None)
-        if call_later is None:
-            return
-        self._advertising_timer = call_later(
-            delay, self._async_advertising_timer_fired
-        )
+    @property
+    def is_connected(self) -> bool:
+        """True while the host adapter is in a GATT session with the cuff."""
+        return self.device_data.is_connected
 
     def _ensure_grace_timer(self) -> None:
         """Dump after 60s even if Home Assistant sends no further advertisements."""
@@ -561,31 +565,43 @@ class VerovalBleCoordinator(
                 other.device_data.consume_shared_dump(other.cuff_user)
             )
 
-    @callback
-    def _async_advertising_timer_fired(self) -> None:
-        """Push a listener update after advertisements have gone stale."""
-        self._advertising_timer = None
-        self.async_update_listeners()
-
     def async_start_bluez_rssi_watch(self) -> Callable[[], None]:
-        """Watch BlueZ Device1 RSSI so a User-button flash is live without HA ads."""
+        """Watch BlueZ Device1 RSSI and Connected on the host adapter."""
+        unsub = self.device_data.async_add_connected_listener(
+            self.async_update_listeners
+        )
         if not is_bluez_pairing_supported():
-            return lambda: None
+            return unsub
         create_task = getattr(self.hass, "async_create_task", None)
         if create_task is None:
-            return lambda: None
+            return unsub
         task = create_task(
             async_watch_device_rssi(
                 self.address,
                 self.async_handle_bluez_rssi,
                 BLUEZ_RSSI_POLL_SECONDS,
+                on_connected=self.async_handle_bluez_connected,
             )
         )
 
         def _stop() -> None:
             task.cancel()
+            unsub()
 
         return _stop
+
+    @callback
+    def async_handle_bluez_connected(self, connected: bool) -> None:
+        """Mirror Device1 Connected from bluetoothctl onto the diagnostic."""
+        if self.hass.state is not CoreState.running:
+            return
+        if connected != self.device_data.bluez_connected:
+            _LOGGER.debug(
+                "BlueZ Device1 Connected=%s for %s",
+                connected,
+                self.address,
+            )
+        self.device_data.set_bluez_connected(connected)
 
     @callback
     def async_handle_bluez_rssi(self, rssi: int) -> None:
@@ -608,8 +624,6 @@ class VerovalBleCoordinator(
             create_task = getattr(self.hass, "async_create_task", None)
             if create_task is not None:
                 create_task(self._async_poll_connectable())
-        if self.device_data.is_advertising():
-            self._schedule_advertising_timer()
         self.async_update_listeners()
 
     async def _async_poll_connectable(self) -> None:
@@ -709,8 +723,6 @@ class VerovalBleCoordinator(
         ``DataUpdateCoordinator`` and has no ``async_set_updated_data``.
         """
         self.data = measurement
-        if self.device_data.is_advertising():
-            self._schedule_advertising_timer()
         self.async_update_listeners()
 
     @callback
@@ -731,8 +743,6 @@ class VerovalBleCoordinator(
         self.rssi = service_info.rssi
         super()._async_handle_bluetooth_event(service_info, change)
         self._ensure_grace_timer()
-        if self.device_data.is_advertising():
-            self._schedule_advertising_timer()
         self.async_update_listeners()
 
 

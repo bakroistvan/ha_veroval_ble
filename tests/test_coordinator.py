@@ -871,6 +871,32 @@ def test_bluez_rssi_after_idle_starts_advertising() -> None:
     assert data._grace_started_at == 10_000.0
 
 
+def test_bluez_connected_sets_is_connected() -> None:
+    data = VerovalBleDeviceData()
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    assert coordinator.is_connected is False
+    coordinator.async_handle_bluez_connected(True)
+    assert data.bluez_connected is True
+    assert coordinator.is_connected is True
+    coordinator.async_handle_bluez_connected(False)
+    assert coordinator.is_connected is False
+
+
+def test_is_connected_while_poll_lock_held() -> None:
+    data = VerovalBleDeviceData()
+    coordinator = _make_coordinator(data)
+    assert coordinator.is_connected is False
+
+    async def run() -> None:
+        async with data._poll_lock:
+            assert data.is_connected is True
+            assert coordinator.is_connected is True
+
+    asyncio.run(run())
+    assert coordinator.is_connected is False
+
+
 def test_bluez_rssi_watch_is_noop_without_create_task() -> None:
     coordinator = _make_coordinator(VerovalBleDeviceData())
     coordinator.hass = SimpleNamespace()

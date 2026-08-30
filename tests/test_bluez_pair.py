@@ -30,6 +30,7 @@ PairingFailedError = _bluez_pair.PairingFailedError
 is_local_bluez_device = _bluez_pair.is_local_bluez_device
 bluez_path_from_device = _bluez_pair.bluez_path_from_device
 rssi_from_device_props = _bluez_pair.rssi_from_device_props
+connected_from_device_props = _bluez_pair.connected_from_device_props
 
 
 class _FakeDBusError(Exception):
@@ -100,6 +101,17 @@ def test_rssi_from_device_props_unwraps_variant() -> None:
     assert rssi_from_device_props({"RSSI": _Variant(-54)}) == -54
     assert rssi_from_device_props({"RSSI": -65}) == -65
     assert rssi_from_device_props({"RSSI": True}) is None
+
+
+def test_connected_from_device_props_matches_bluetoothctl() -> None:
+    class _Variant:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+    assert connected_from_device_props({}) is False
+    assert connected_from_device_props({"Connected": False}) is False
+    assert connected_from_device_props({"Connected": True}) is True
+    assert connected_from_device_props({"Connected": _Variant(True)}) is True
 
 
 def test_provide_passkey_second_call_does_not_raise() -> None:

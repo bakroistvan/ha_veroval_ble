@@ -21,11 +21,12 @@ IRREGULAR_PULSE_DESCRIPTION = BinarySensorEntityDescription(
     icon="mdi:heart-pulse",
 )
 
-ADVERTISING_DESCRIPTION = BinarySensorEntityDescription(
-    key="advertising",
-    translation_key="advertising",
+CONNECTED_DESCRIPTION = BinarySensorEntityDescription(
+    key="connected",
+    translation_key="connected",
+    device_class=BinarySensorDeviceClass.CONNECTIVITY,
     entity_category=EntityCategory.DIAGNOSTIC,
-    icon="mdi:bluetooth",
+    icon="mdi:bluetooth-connect",
 )
 
 
@@ -39,7 +40,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             VerovalBleIrregularPulseSensor(coordinator, IRREGULAR_PULSE_DESCRIPTION),
-            VerovalBleAdvertisingSensor(coordinator, ADVERTISING_DESCRIPTION),
+            VerovalBleConnectedSensor(coordinator, CONNECTED_DESCRIPTION),
         ]
     )
 
@@ -61,20 +62,20 @@ class VerovalBleIrregularPulseSensor(VerovalBleEntity, BinarySensorEntity):
         return measurement.irregular_pulse
 
 
-class VerovalBleAdvertisingSensor(VerovalBleEntity, BinarySensorEntity):
-    """On while a live BPU26 sighting is recent; off shortly after the cuff sleeps."""
+class VerovalBleConnectedSensor(VerovalBleEntity, BinarySensorEntity):
+    """On while the Home Assistant host adapter has a GATT link to the cuff."""
 
     @property
     def available(self) -> bool:
-        """Always shown so Off means the cuff is not advertising."""
+        """Always shown so Off means the host is not connected."""
         return True
 
     @property
     def assumed_state(self) -> bool:
-        """Off is a real 'no advertisements' reading, not a stale last value."""
+        """Off is a real disconnect, not a stale last value."""
         return False
 
     @property
     def is_on(self) -> bool:
-        """Return True while the last live advertisement is still recent."""
-        return self.coordinator.is_advertising
+        """Return True while BlueZ Device1 Connected is yes, or a dump is running."""
+        return self.coordinator.is_connected

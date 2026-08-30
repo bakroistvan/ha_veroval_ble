@@ -96,8 +96,8 @@
       "irregular_pulse": {
         "name": "Irregular pulse"
       },
-      "advertising": {
-        "name": "Advertising"
+      "connected": {
+        "name": "Connected"
       }
     }
   },

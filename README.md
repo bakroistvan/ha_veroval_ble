@@ -97,7 +97,7 @@ After the cuff starts advertising, Home Assistant **waits 60 seconds** before co
 | Pulse | bpm |
 | Measured time | Cuff timestamp of the published reading |
 | Last synchronized | Home Assistant time of the last successful dump for this slot |
-| Advertising | Diagnostic: **on** while a *live* BPU26 advertisement or host RSSI was seen in the last few seconds, **off** shortly after the cuff sleeps. Home Assistant can keep a cached discovery after the cuff sleeps; this sensor ignores the cache. |
+| Connected | Diagnostic: **on** while the Home Assistant host Bluetooth adapter has a GATT link to the cuff (`bluetoothctl` **Connected: yes**), **off** when the cuff is asleep or only advertising. |
 | User slot | Label **User 1** / **User 2** |
 | Irregular pulse | Binary sensor (not atrial fibrillation) |
 

@@ -1,4 +1,4 @@
-"""Unit tests for the advertising diagnostic binary sensor (no Home Assistant)."""
+"""Unit tests for the connected diagnostic binary sensor (no Home Assistant)."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ def _stub_homeassistant() -> None:
 
     class BinarySensorDeviceClass:
         PROBLEM = "problem"
+        CONNECTIVITY = "connectivity"
 
     class BinarySensorEntity:
         pass
@@ -130,36 +131,37 @@ def _load_binary_sensor() -> ModuleType:
 
 
 _binary = _load_binary_sensor()
-VerovalBleAdvertisingSensor = _binary.VerovalBleAdvertisingSensor
-ADVERTISING_DESCRIPTION = _binary.ADVERTISING_DESCRIPTION
+VerovalBleConnectedSensor = _binary.VerovalBleConnectedSensor
+CONNECTED_DESCRIPTION = _binary.CONNECTED_DESCRIPTION
 
 
-def _sensor(*, advertising: bool) -> VerovalBleAdvertisingSensor:
+def _sensor(*, connected: bool) -> VerovalBleConnectedSensor:
     coordinator = SimpleNamespace(
         address="AA:BB:CC:DD:EE:FF",
         cuff_user=1,
-        is_advertising=advertising,
-        available=advertising,
+        is_connected=connected,
+        available=True,
     )
-    return VerovalBleAdvertisingSensor(coordinator, ADVERTISING_DESCRIPTION)
+    return VerovalBleConnectedSensor(coordinator, CONNECTED_DESCRIPTION)
 
 
-def test_advertising_on_when_ads_are_captured() -> None:
-    sensor = _sensor(advertising=True)
+def test_connected_on_when_host_has_gatt_link() -> None:
+    sensor = _sensor(connected=True)
     assert sensor.available is True
     assert sensor.assumed_state is False
     assert sensor.is_on is True
 
 
-def test_advertising_off_when_ads_stop() -> None:
-    sensor = _sensor(advertising=False)
+def test_connected_off_when_cuff_is_asleep() -> None:
+    sensor = _sensor(connected=False)
     assert sensor.available is True
     assert sensor.assumed_state is False
     assert sensor.is_on is False
 
 
-def test_advertising_is_diagnostic() -> None:
-    assert ADVERTISING_DESCRIPTION.key == "advertising"
-    assert ADVERTISING_DESCRIPTION.entity_category == "diagnostic"
-    sensor = _sensor(advertising=False)
-    assert sensor._attr_unique_id == "aa:bb:cc:dd:ee:ff_1_advertising"
+def test_connected_is_diagnostic() -> None:
+    assert CONNECTED_DESCRIPTION.key == "connected"
+    assert CONNECTED_DESCRIPTION.entity_category == "diagnostic"
+    assert CONNECTED_DESCRIPTION.device_class == "connectivity"
+    sensor = _sensor(connected=False)
+    assert sensor._attr_unique_id == "aa:bb:cc:dd:ee:ff_1_connected"
