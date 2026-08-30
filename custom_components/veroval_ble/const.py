@@ -19,6 +19,8 @@ DUMP_TIMEOUT_SECONDS = 30.0
 # Longer than a brief scanner gap; shorter than a new measurement (~30–60s)
 # and the cuff's ~2 minute advertise period.
 AD_SILENCE_NEW_WINDOW_SECONDS = 20
+# HA scanner cache can outlive BlueZ Device1; pairing needs a recent host ad.
+ADVERTISEMENT_MAX_AGE_SECONDS = 30.0
 # Last-resort expiry if HA keeps delivering ads and never marks unavailable.
 POLL_WINDOW_GAP_SECONDS = 180
 # Wait after the first advertisement of a new GATT window so medi.connect

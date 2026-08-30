@@ -22,6 +22,7 @@ from homeassistant.components.bluetooth.active_update_coordinator import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CoreState, HomeAssistant, callback
 
+from .advertisement import advertisement_is_live, advertisement_monotonic_time
 from .client import dump_latest
 from .const import (
     AD_SILENCE_NEW_WINDOW_SECONDS,
@@ -87,6 +88,8 @@ class VerovalBleDeviceData:
         self._polled_this_window = False
         self._window_polled_at: float | None = None
         self._last_ad_time: float | None = None
+        self._last_ad_stamp: float | None = None
+        self._stale_ad_logged = False
         self._awaiting_new_window = False
         self._window_records: list[BloodPressureMeasurement] | None = None
         self._consumed_slots: set[int] = set()
@@ -147,6 +150,24 @@ class VerovalBleDeviceData:
             return
         self._begin_new_window("poll-window gap expired")
 
+    def is_advertising(self, now: float | None = None) -> bool:
+        """True if a live advertisement was accepted recently."""
+        if self._last_ad_time is None:
+            return False
+        if now is None:
+            now = self._monotonic()
+        return now - self._last_ad_time < AD_SILENCE_NEW_WINDOW_SECONDS
+
+    def _advertisement_is_live(self, service_info: object, now: float) -> bool:
+        """Return True if this callback is a real, new advertisement."""
+        return advertisement_is_live(
+            service_info,
+            now,
+            max_age=AD_SILENCE_NEW_WINDOW_SECONDS,
+            require_timestamp=False,
+            last_seen_stamp=self._last_ad_stamp,
+        )
+
     def poll_needed(
         self,
         service_info: BluetoothServiceInfoBleak,  # noqa: ARG002
@@ -159,12 +180,27 @@ class VerovalBleDeviceData:
         another connect). Pass *cuff_user* so the other slot can consume the
         shared dump without a second connection.
 
-        A new window starts when advertisements have been gone long enough
-        (silence or idle unavailable), not only after ``POLL_WINDOW_GAP_SECONDS``.
-        A fresh GATT connect still waits ``PHONE_GRACE_SECONDS`` so medi.connect
-        can take the transfer. Shared-cache consume and ``force_dump`` do not.
+        A new window starts when *live* advertisements have been gone long
+        enough (silence or idle unavailable), not only after
+        ``POLL_WINDOW_GAP_SECONDS``. Cached scanner callbacks do not refresh
+        the last-ad clock. A fresh GATT connect still waits
+        ``PHONE_GRACE_SECONDS`` so medi.connect can take the transfer.
+        Shared-cache consume and ``force_dump`` do not.
         """
         now = self._monotonic()
+        if not self._advertisement_is_live(service_info, now):
+            if not self._stale_ad_logged:
+                _LOGGER.debug(
+                    "Ignoring stale or cached advertisement for %s",
+                    _advertisement_address(service_info),
+                )
+                self._stale_ad_logged = True
+            return False
+        self._stale_ad_logged = False
+        stamp = advertisement_monotonic_time(service_info)
+        if stamp is not None:
+            self._last_ad_stamp = stamp
+
         self._expire_stale_window(now)
 
         if self._poll_lock.locked():
@@ -350,6 +386,7 @@ class VerovalBleCoordinator(
         self.cuff_user = cuff_user
         self.device_data = device_data
         self.rssi: int | None = None
+        self._advertising_timer: object | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -373,8 +410,41 @@ class VerovalBleCoordinator(
 
     @property
     def is_advertising(self) -> bool:
-        """True while Home Assistant is receiving BPU26 advertisements."""
-        return self.available
+        """True while a fresh BPU26 advertisement was seen recently.
+
+        Home Assistant's ``available`` flag stays true long after the cuff
+        sleeps because the scanner cache is still delivered. The advertising
+        sensor follows the last *live* advertisement, not that flag.
+        """
+        return self.device_data.is_advertising()
+
+    def _cancel_advertising_timer(self) -> None:
+        """Cancel the delayed listener refresh that turns advertising off."""
+        handle = self._advertising_timer
+        if handle is None:
+            return
+        cancel = getattr(handle, "cancel", None)
+        if cancel is not None:
+            cancel()
+        self._advertising_timer = None
+
+    def _schedule_advertising_timer(self) -> None:
+        """Refresh entities after the live-ad window so the sensor can go off."""
+        self._cancel_advertising_timer()
+        loop = getattr(self.hass, "loop", None)
+        call_later = getattr(loop, "call_later", None)
+        if call_later is None:
+            return
+        self._advertising_timer = call_later(
+            AD_SILENCE_NEW_WINDOW_SECONDS + 0.5,
+            self._async_advertising_timer_fired,
+        )
+
+    @callback
+    def _async_advertising_timer_fired(self) -> None:
+        """Push a listener update after advertisements have gone stale."""
+        self._advertising_timer = None
+        self.async_update_listeners()
 
     def _async_needs_poll(
         self,
@@ -453,6 +523,8 @@ class VerovalBleCoordinator(
         ``DataUpdateCoordinator`` and has no ``async_set_updated_data``.
         """
         self.data = measurement
+        if self.device_data.is_advertising():
+            self._schedule_advertising_timer()
         self.async_update_listeners()
 
     @callback
@@ -472,6 +544,9 @@ class VerovalBleCoordinator(
         """Track RSSI from advertisements; never log them at INFO."""
         self.rssi = service_info.rssi
         super()._async_handle_bluetooth_event(service_info, change)
+        if self.device_data.is_advertising():
+            self._schedule_advertising_timer()
+        self.async_update_listeners()
 
 
 type VerovalBleConfigEntry = ConfigEntry[VerovalBleCoordinator]

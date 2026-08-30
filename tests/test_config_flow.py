@@ -139,13 +139,14 @@ CONF_CUFF_USER = "cuff_user"
 CONF_ADDRESS = "address"
 
 
-def _discovery() -> SimpleNamespace:
+def _discovery(*, fresh: bool = True) -> SimpleNamespace:
+    ad_time = time.monotonic() if fresh else time.monotonic() - 120
     return SimpleNamespace(
         name="BPU26",
         address=ADDRESS_UPPER,
         manufacturer_data={},
         device=None,
-        time=None,
+        time=ad_time,
     )
 
 
@@ -344,6 +345,15 @@ def test_bluetooth_confirm_host_fresh_goes_to_pairing() -> None:
     assert result["step_id"] == "pairing"
 
 
+def test_bluetooth_stale_discovery_aborts_without_unique_id() -> None:
+    """Cached ads must not leave a Discovered / Add card while the cuff sleeps."""
+    flow = _flow([_slot_entry(1)])
+    result = asyncio.run(flow.async_step_bluetooth(_discovery(fresh=False)))
+    assert result["type"] == "abort"
+    assert result["reason"] == "stale_advertisement"
+    assert flow.unique_id is None
+
+
 def test_bluetooth_confirm_stale_host_scans() -> None:
     flow = _flow([])
     scanned = False
@@ -356,7 +366,9 @@ def test_bluetooth_confirm_stale_host_scans() -> None:
     flow.async_step_scan = _fake_scan  # type: ignore[method-assign]
 
     async def _run() -> dict:
-        await flow.async_step_bluetooth(_host_discovery(fresh=False))
+        await flow.async_step_bluetooth(_host_discovery(fresh=True))
+        assert flow._discovery_info is not None
+        flow._discovery_info.time = time.monotonic() - 120
         return await flow.async_step_bluetooth_confirm({})
 
     result = asyncio.run(_run())

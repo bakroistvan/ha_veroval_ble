@@ -127,6 +127,7 @@ Typical coordinator lines:
 - `DEBUG` `Phone grace elapsed; polling aa:bb:…`
 - `DEBUG` `Cuff disappeared during phone grace; skipping dump for aa:bb:…`
 - `DEBUG` `Starting new advertise window (advertisement silence)` / `(idle unavailable)`
+- `DEBUG` `Ignoring stale or cached advertisement for aa:bb:…`
 - `INFO` `Force dump aa:bb:…`
 
 ## What appears in the log

@@ -69,6 +69,11 @@ def _stub_homeassistant() -> None:
         def _async_handle_unavailable(self, service_info: object) -> None:
             return None
 
+        def _async_handle_bluetooth_event(
+            self, service_info: object, change: object
+        ) -> None:
+            return None
+
     active.ActiveBluetoothDataUpdateCoordinator = ActiveBluetoothDataUpdateCoordinator
 
     class ConfigEntry:

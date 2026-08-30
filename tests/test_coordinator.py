@@ -74,6 +74,11 @@ def _stub_homeassistant() -> None:
         def _async_handle_unavailable(self, service_info: object) -> None:
             return None
 
+        def _async_handle_bluetooth_event(
+            self, service_info: object, change: object
+        ) -> None:
+            return None
+
         def async_set_updated_data(self, data: object) -> None:
             self.data = data
 
@@ -428,12 +433,20 @@ def test_coordinator_force_poll_updates_data() -> None:
     assert coordinator.data is result.selected
 
 
-def test_is_advertising_follows_coordinator_available() -> None:
-    coordinator = _make_coordinator(VerovalBleDeviceData())
-    assert coordinator.is_advertising is False
+def test_is_advertising_follows_last_live_ad_not_available() -> None:
+    """HA available stays true on cached ads; the sensor must not."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    coordinator = _make_coordinator(data)
     coordinator._available = True
+    assert coordinator.is_advertising is False
+
+    live = SimpleNamespace(time=0.0)
+    assert data.poll_needed(live, None) is False
     assert coordinator.is_advertising is True
-    coordinator._available = False
+
+    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS
+    coordinator._available = True
     assert coordinator.is_advertising is False
 
 
@@ -698,3 +711,62 @@ def test_missing_characteristic_does_not_set_last_synchronized() -> None:
 
     asyncio.run(run())
     assert data.last_synchronized == {}
+
+
+def test_stale_cached_ad_does_not_refresh_last_ad_time() -> None:
+    """HA can keep delivering the last packet after the cuff sleeps."""
+    clock = _FakeClock(100.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    live = SimpleNamespace(time=100.0)
+    assert data.poll_needed(live, None) is False
+    assert data._last_ad_time == 100.0
+    assert data._last_ad_stamp == 100.0
+
+    clock.now = 110.0
+    stale = SimpleNamespace(time=50.0)
+    assert data.poll_needed(stale, None) is False
+    assert data._last_ad_time == 100.0
+    assert data._grace_started_at == 100.0
+
+    clock.now = 100.0 + AD_SILENCE_NEW_WINDOW_SECONDS
+    assert data.is_advertising() is False
+
+
+def test_replayed_same_stamp_is_not_live() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    first = SimpleNamespace(time=0.0)
+    assert data.poll_needed(first, None) is False
+    clock.now = 5.0
+    replay = SimpleNamespace(time=0.0)
+    assert data.poll_needed(replay, None) is False
+    assert data._last_ad_time == 0.0
+
+
+def test_cached_ads_after_dump_do_not_block_next_window() -> None:
+    """Issue #23: scanner cache must not mute the next real measurement."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+    data._last_ad_time = 0.0
+    data._last_ad_stamp = 0.0
+    assert data._polled_this_window is True
+
+    for now in (10.0, 30.0, 90.0, 150.0):
+        clock.now = now
+        cached = SimpleNamespace(time=0.0)
+        assert data.poll_needed(cached, None, 1) is False
+        assert data._polled_this_window is True
+
+    clock.now = 200.0
+    fresh = SimpleNamespace(time=200.0)
+    assert data.poll_needed(fresh, None, 1) is False
+    assert data._grace_started_at == 200.0
+    clock.now = 200.0 + PHONE_GRACE_SECONDS
+    later = SimpleNamespace(time=clock.now)
+    assert data.poll_needed(later, None, 1) is True

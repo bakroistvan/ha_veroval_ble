@@ -62,7 +62,7 @@ class VerovalBleIrregularPulseSensor(VerovalBleEntity, BinarySensorEntity):
 
 
 class VerovalBleAdvertisingSensor(VerovalBleEntity, BinarySensorEntity):
-    """On while Home Assistant is receiving BPU26 advertisements."""
+    """On while a fresh BPU26 advertisement was seen in the last ~20 seconds."""
 
     @property
     def available(self) -> bool:
@@ -76,5 +76,5 @@ class VerovalBleAdvertisingSensor(VerovalBleEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return True while the coordinator is seeing advertisements."""
+        """Return True while the last live advertisement is still recent."""
         return self.coordinator.is_advertising
