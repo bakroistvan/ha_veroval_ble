@@ -25,6 +25,7 @@ from homeassistant.core import CoreState, HomeAssistant, callback
 from .client import dump_latest
 from .const import (
     AD_SILENCE_NEW_WINDOW_SECONDS,
+    PHONE_GRACE_SECONDS,
     POLL_WINDOW_GAP_SECONDS,
     UPDATE_INTERVAL,
 )
@@ -41,6 +42,18 @@ _ADDRESS_LOCKS: dict[str, asyncio.Lock] = {}
 
 class CuffNotConnectableError(RuntimeError):
     """Raised when a force dump cannot resolve a connectable BLEDevice."""
+
+
+def _advertisement_address(service_info: object) -> str:
+    """Best-effort BLE address from an advertisement callback argument."""
+    device = getattr(service_info, "device", None)
+    address = getattr(device, "address", None)
+    if address:
+        return str(address)
+    address = getattr(service_info, "address", None)
+    if address:
+        return str(address)
+    return "unknown"
 
 
 def _address_lock(address: str) -> asyncio.Lock:
@@ -66,15 +79,55 @@ class VerovalBleDeviceData:
         self._awaiting_new_window = False
         self._window_records: list[BloodPressureMeasurement] | None = None
         self._consumed_slots: set[int] = set()
+        self._grace_started_at: float | None = None
+        self._grace_address: str | None = None
+        self._grace_elapsed_logged = False
+        self._window_skipped = False
 
     def _begin_new_window(self, reason: str) -> None:
-        """Clear dump-skip state so the next advertisement can start a GATT dump."""
+        """Clear dump-skip and grace state so the next ad can start a GATT dump."""
         _LOGGER.debug("Starting new advertise window (%s)", reason)
         self._polled_this_window = False
         self._window_polled_at = None
         self._window_records = None
         self._consumed_slots.clear()
         self._awaiting_new_window = False
+        self._grace_started_at = None
+        self._grace_address = None
+        self._grace_elapsed_logged = False
+        self._window_skipped = False
+
+    def _grace_in_progress(self) -> bool:
+        """True while waiting for the phone, including after the 60s elapsed."""
+        return (
+            self._grace_started_at is not None
+            and not self._window_skipped
+            and self._window_records is None
+            and not self._polled_this_window
+        )
+
+    def _phone_grace_allows_poll(
+        self,
+        service_info: object,
+        last_poll: float | None,
+        now: float,
+    ) -> bool:
+        """Start or continue the 60s phone-first wait; True when a dump may start."""
+        address = _advertisement_address(service_info)
+        if self._grace_started_at is None:
+            self._grace_started_at = now
+            self._grace_address = address if address != "unknown" else None
+            _LOGGER.debug(
+                "Waiting %ss for phone app before polling %s",
+                PHONE_GRACE_SECONDS,
+                address,
+            )
+        if now - self._grace_started_at < PHONE_GRACE_SECONDS:
+            return False
+        if not self._grace_elapsed_logged:
+            _LOGGER.debug("Phone grace elapsed; polling %s", address)
+            self._grace_elapsed_logged = True
+        return not last_poll or last_poll > UPDATE_INTERVAL
 
     def _expire_stale_window(self, now: float) -> None:
         """Drop the dump cache after the last-resort gap (HA never went unavailable)."""
@@ -97,6 +150,8 @@ class VerovalBleDeviceData:
 
         A new window starts when advertisements have been gone long enough
         (silence or idle unavailable), not only after ``POLL_WINDOW_GAP_SECONDS``.
+        A fresh GATT connect still waits ``PHONE_GRACE_SECONDS`` so medi.connect
+        can take the transfer. Shared-cache consume and ``force_dump`` do not.
         """
         now = self._monotonic()
         self._expire_stale_window(now)
@@ -104,13 +159,21 @@ class VerovalBleDeviceData:
         if self._poll_lock.locked():
             return False
 
+        if self._window_skipped:
+            return False
+
+        # Scanner gaps during the 60s wait must not look like a new window.
+        if self._grace_in_progress():
+            self._last_ad_time = now
+            return self._phone_grace_allows_poll(service_info, last_poll, now)
+
         if (
             self._last_ad_time is not None
             and now - self._last_ad_time >= AD_SILENCE_NEW_WINDOW_SECONDS
         ):
             self._begin_new_window("advertisement silence")
             self._last_ad_time = now
-            return True
+            return self._phone_grace_allows_poll(service_info, last_poll, now)
 
         if self._awaiting_new_window:
             if (
@@ -122,7 +185,7 @@ class VerovalBleDeviceData:
                 return True
             self._begin_new_window("idle unavailable")
             self._last_ad_time = now
-            return True
+            return self._phone_grace_allows_poll(service_info, last_poll, now)
 
         self._last_ad_time = now
 
@@ -141,19 +204,34 @@ class VerovalBleDeviceData:
                 cuff_user,
             )
             return False
-        return not last_poll or last_poll > UPDATE_INTERVAL
+        return self._phone_grace_allows_poll(service_info, last_poll, now)
 
-    def mark_window_ended(self) -> None:
-        """Allow another dump after the cuff stops advertising.
+    def mark_window_ended(self, address: str | None = None) -> None:
+        """Handle the cuff stopping advertisements.
 
         Connecting stops advertisements, so Home Assistant may mark the cuff
         unavailable while a dump is still running. Ignore that signal.
 
+        If the phone-first grace is still open, treat disappearance as the
+        phone grabbing the transfer and skip this window.
+
         Keep ``_window_records`` / ``_consumed_slots`` so the other user slot
         can still consume this window's dump. The next advertisement for a
-        slot that already consumed starts a new window.
+        slot that already consumed starts a new window (then grace).
         """
         if self._poll_lock.locked():
+            return
+        if self._window_skipped:
+            return
+        if self._grace_in_progress():
+            label = address or self._grace_address or "unknown"
+            self._window_skipped = True
+            self._window_polled_at = self._monotonic()
+            self._grace_started_at = None
+            _LOGGER.debug(
+                "Cuff disappeared during phone grace; skipping dump for %s",
+                label,
+            )
             return
         self._polled_this_window = False
         self._awaiting_new_window = True
@@ -358,8 +436,8 @@ class VerovalBleCoordinator(
     def _async_handle_unavailable(
         self, service_info: BluetoothServiceInfoBleak
     ) -> None:
-        """Reset dump-skip so the next advertise window can poll again."""
-        self.device_data.mark_window_ended()
+        """Skip an in-progress phone grace, or reset after a finished dump."""
+        self.device_data.mark_window_ended(self.address)
         super()._async_handle_unavailable(service_info)
 
     @callback

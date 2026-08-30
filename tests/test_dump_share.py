@@ -132,6 +132,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 _const, _parser, _coordinator = _load_coordinator()
 DUMP_IDLE_SECONDS = _const.DUMP_IDLE_SECONDS
 DUMP_TIMEOUT_SECONDS = _const.DUMP_TIMEOUT_SECONDS
+PHONE_GRACE_SECONDS = _const.PHONE_GRACE_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
 VerovalBleCoordinator = _coordinator.VerovalBleCoordinator
 BloodPressureMeasurement = _parser.BloodPressureMeasurement
@@ -363,7 +364,8 @@ def test_mark_window_ended_keeps_shared_dump_cache() -> None:
 
 
 def test_needs_poll_passes_cuff_user() -> None:
-    data = VerovalBleDeviceData()
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
     seen: list[int | None] = []
     original = data.poll_needed
 
@@ -382,8 +384,10 @@ def test_needs_poll_passes_cuff_user() -> None:
     _coordinator.async_ble_device_from_address = lambda *args, **kwargs: object()
     try:
         service_info = SimpleNamespace(device=_FakeBleDevice())
+        assert coord._async_needs_poll(service_info, None) is False
+        clock.now = PHONE_GRACE_SECONDS
         assert coord._async_needs_poll(service_info, None) is True
-        assert seen == [CUFF_USER_2]
+        assert seen == [CUFF_USER_2, CUFF_USER_2]
     finally:
         _coordinator.async_ble_device_from_address = previous
 
@@ -392,7 +396,8 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
     """Consumed slots must not block the next advertise window.
 
     mark_window_ended keeps the dump cache so User 2 can still consume it.
-    The next advertisement for a consumed slot starts a new GATT dump.
+    The next advertisement for a consumed slot starts a new window, then
+    phone grace, then a new GATT dump.
     """
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
@@ -429,8 +434,11 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
         await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
         data.mark_window_ended()
         assert data._window_records is not None
-        assert data.poll_needed(object(), None, CUFF_USER_1) is True
+        assert data.poll_needed(object(), None, CUFF_USER_1) is False
         assert data._window_records is None
+        assert data._grace_started_at == 0.0
+        clock.now = PHONE_GRACE_SECONDS
+        assert data.poll_needed(object(), None, CUFF_USER_1) is True
         return await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
 
     published = asyncio.run(run())
@@ -464,3 +472,36 @@ def test_idle_unavailable_user_2_still_consumes_cache() -> None:
     assert data.poll_needed(object(), None, CUFF_USER_2) is True
     assert data._window_records is not None
     assert CUFF_USER_1 in data._consumed_slots
+
+
+def test_shared_grace_user_2_does_not_restart_wait() -> None:
+    """User 1 and User 2 share one grace; after the dump, User 2 uses the cache."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    user1 = _measurement(
+        user_id=BLE_USER_1,
+        timestamp=datetime(2024, 1, 15, 12, 0, 0),
+    )
+    user2 = _measurement(
+        user_id=BLE_USER_2,
+        timestamp=datetime(2024, 1, 14, 9, 30, 0),
+        systolic=130.0,
+    )
+    calls = _patch_dump([user1, user2])
+
+    assert data.poll_needed(object(), None, CUFF_USER_1) is False
+    started = data._grace_started_at
+    assert data.poll_needed(object(), None, CUFF_USER_2) is False
+    assert data._grace_started_at == started
+
+    clock.now = PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None, CUFF_USER_1) is True
+
+    async def run() -> object:
+        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+        assert data.poll_needed(object(), None, CUFF_USER_2) is True
+        return await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
+
+    second = asyncio.run(run())
+    assert calls["n"] == 1
+    assert second is user2

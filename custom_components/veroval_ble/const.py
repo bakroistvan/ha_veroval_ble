@@ -21,5 +21,8 @@ DUMP_TIMEOUT_SECONDS = 30.0
 AD_SILENCE_NEW_WINDOW_SECONDS = 20
 # Last-resort expiry if HA keeps delivering ads and never marks unavailable.
 POLL_WINDOW_GAP_SECONDS = 180
+# Wait after the first advertisement of a new GATT window so medi.connect
+# can take the transfer. Cache consume and force_dump skip this wait.
+PHONE_GRACE_SECONDS = 60
 SCAN_TIMEOUT_SECONDS = 60
 UPDATE_INTERVAL = 10

@@ -84,6 +84,8 @@ Sensors belong to **that slot only**. A second person can add the same cuff agai
 
 Each sync **drains** the BLE history dump, then publishes the record with the **newest timestamp for the selected slot** — not the first packet.
 
+After the cuff starts advertising, Home Assistant **waits 60 seconds** before connecting so **medi.connect** can take the transfer first. If the Bluetooth symbol goes out during that minute (the phone connected), Home Assistant skips that window. Pairing still needs a single bond — unpair the phone during setup. This wait does not keep both the phone and Home Assistant paired at once. A later advertise window (new measurement) starts the same 60-second wait; **Force data sync** (`veroval_ble.force_dump`) connects immediately.
+
 **Delete:** Removing the **last** Veroval device for a cuff also removes the host Bluetooth bond. Deleting only one of two user slots (User 1 or User 2) leaves the bond so the other slot keeps working.
 
 ## Sensors

@@ -137,6 +137,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 
 _const, _parser, _coordinator = _load_coordinator()
 AD_SILENCE_NEW_WINDOW_SECONDS = _const.AD_SILENCE_NEW_WINDOW_SECONDS
+PHONE_GRACE_SECONDS = _const.PHONE_GRACE_SECONDS
 POLL_WINDOW_GAP_SECONDS = _const.POLL_WINDOW_GAP_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
 VerovalBleCoordinator = _coordinator.VerovalBleCoordinator
@@ -234,8 +235,10 @@ def test_unavailable_while_idle_clears_flag() -> None:
     assert data._polled_this_window is False
     assert data._window_polled_at is None
     assert data._awaiting_new_window is True
-    assert data.poll_needed(object(), None) is True
+    # Fresh GATT after idle unavailable starts phone grace, not an immediate dump.
+    assert data.poll_needed(object(), None) is False
     assert data._awaiting_new_window is False
+    assert data._grace_started_at == 10.0
 
 
 def test_poll_needed_true_again_after_window_gap() -> None:
@@ -252,9 +255,13 @@ def test_poll_needed_true_again_after_window_gap() -> None:
     assert data._polled_this_window is True
 
     clock.now = POLL_WINDOW_GAP_SECONDS
-    assert data.poll_needed(object(), None) is True
+    assert data.poll_needed(object(), None) is False
     assert data._polled_this_window is False
     assert data._window_polled_at is None
+    assert data._grace_started_at == POLL_WINDOW_GAP_SECONDS
+
+    clock.now = POLL_WINDOW_GAP_SECONDS + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
 
 
 def test_consumed_slot_polls_again_after_idle_unavailable() -> None:
@@ -277,10 +284,13 @@ def test_consumed_slot_polls_again_after_idle_unavailable() -> None:
     data.mark_window_ended()
     assert data._window_records is not None
     assert data._awaiting_new_window is True
-    assert data.poll_needed(object(), None, 1) is True
+    assert data.poll_needed(object(), None, 1) is False
     assert data._window_records is None
     assert data._consumed_slots == set()
     assert data._awaiting_new_window is False
+    assert data._grace_started_at == 50.0
+    clock.now = 50.0 + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None, 1) is True
 
 
 def test_advertisement_silence_starts_new_window() -> None:
@@ -303,9 +313,12 @@ def test_advertisement_silence_starts_new_window() -> None:
     assert data._window_records is not None
 
     clock.now += AD_SILENCE_NEW_WINDOW_SECONDS
-    assert data.poll_needed(object(), None, 1) is True
+    assert data.poll_needed(object(), None, 1) is False
     assert data._window_records is None
     assert data._polled_this_window is False
+    assert data._grace_started_at == clock.now
+    clock.now += PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None, 1) is True
 
 
 def test_same_window_ads_do_not_start_new_dump() -> None:
@@ -408,3 +421,153 @@ def test_coordinator_force_poll_updates_data() -> None:
     published = asyncio.run(run())
     assert published is result.selected
     assert coordinator.data is result.selected
+
+
+def test_first_poll_needed_starts_phone_grace() -> None:
+    clock = _FakeClock(100.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    dumps = {"n": 0}
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        dumps["n"] += 1
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+
+    assert data.poll_needed(object(), None) is False
+    assert data._grace_started_at == 100.0
+    clock.now = 100.0 + PHONE_GRACE_SECONDS - 1
+    assert data.poll_needed(object(), None) is False
+    clock.now = 100.0 + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
+    assert dumps["n"] == 0
+
+
+def test_unavailable_during_grace_skips_until_window_gap() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    coordinator = _make_coordinator(data)
+
+    assert data.poll_needed(object(), None) is False
+    clock.now = 30.0
+    coordinator._async_handle_unavailable(object())
+
+    assert data._window_skipped is True
+    assert data._grace_started_at is None
+    assert data._window_polled_at == 30.0
+    assert data._awaiting_new_window is False
+    clock.now = 50.0
+    assert data.poll_needed(object(), None) is False
+
+    clock.now = 30.0 + POLL_WINDOW_GAP_SECONDS
+    assert data.poll_needed(object(), None) is False
+    assert data._window_skipped is False
+    assert data._grace_started_at == 30.0 + POLL_WINDOW_GAP_SECONDS
+
+    clock.now = 30.0 + POLL_WINDOW_GAP_SECONDS + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
+
+
+def test_second_unavailable_after_skip_keeps_gap() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(object(), None) is False
+    clock.now = 10.0
+    data.mark_window_ended("AA:BB:CC:DD:EE:FF")
+    data.mark_window_ended("AA:BB:CC:DD:EE:FF")
+    assert data._window_skipped is True
+    assert data._window_polled_at == 10.0
+
+
+def test_unavailable_after_grace_elapsed_skips_before_dump() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(object(), None) is False
+    clock.now = PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
+    data.mark_window_ended()
+    assert data._window_skipped is True
+    assert data.poll_needed(object(), None) is False
+
+
+def test_after_dump_no_new_grace_until_window_gap() -> None:
+    clock = _FakeClock(50.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+
+    clock.now = 80.0
+    data._last_ad_time = clock.now
+    assert data.poll_needed(object(), None) is False
+    assert data._polled_this_window is True
+    clock.now = 50.0 + POLL_WINDOW_GAP_SECONDS
+    data._last_ad_time = clock.now
+    assert data.poll_needed(object(), None) is False
+    assert data._grace_started_at == 50.0 + POLL_WINDOW_GAP_SECONDS
+
+
+def test_ad_silence_after_dump_starts_phone_grace() -> None:
+    """New window via silence must not dump immediately (medi.connect first)."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+
+    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS
+    assert data.poll_needed(object(), None, 1) is False
+    assert data._grace_started_at == AD_SILENCE_NEW_WINDOW_SECONDS
+    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS + PHONE_GRACE_SECONDS - 1
+    assert data.poll_needed(object(), None, 1) is False
+    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None, 1) is True
+
+
+def test_grace_unavailable_does_not_set_awaiting_new_window() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(object(), None) is False
+    clock.now = 20.0
+    data.mark_window_ended()
+    assert data._window_skipped is True
+    assert data._awaiting_new_window is False
+    assert data.poll_needed(object(), None) is False
+
+
+def test_silence_during_grace_does_not_open_new_window() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(object(), None) is False
+    started = data._grace_started_at
+    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS + 5
+    assert data.poll_needed(object(), None) is False
+    assert data._grace_started_at == started
+    assert data._window_skipped is False
+
+
+def test_force_dump_clears_grace_and_skipped_window() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(object(), None) is False
+    data.mark_window_ended()
+    assert data._window_skipped is True
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> object:
+        return await data.async_force_poll(_FakeBleDevice(), cuff_user=1)
+
+    published = asyncio.run(run())
+    assert published is not None
+    assert data._window_skipped is False
+    assert data._grace_started_at is None
