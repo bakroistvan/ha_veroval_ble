@@ -47,9 +47,9 @@ and must be retargeted.
 
 | Change | Action | Why |
 |--------|--------|-----|
-| #18 | **Retarget to `dev` and merge** | Unique leftover is the Cloud Agent install file. Do not cherry-pick the old entity commit. |
-| #19 | **Retarget to `dev` and merge first among packaging** | Independent of coordinator code. Gives later waves pytest / hassfest / HACS Actions. CI already green vs `main`. |
-| #22 | **Close without merging the PR** after #24 lands | Implementation is #24. Optionally copy `docs/phone-grace-plan.md` into `dev` as historical design notes when #24 merges (or leave it only in the closed PR). |
+| #18 | **Cherry-pick `0d369e7` or rebase onto `dev`, then merge** | Unique leftover is `.cursor/environment.json`. The GitHub UI still shows 4 files because the PR base is stale `main`. **Do not merge the stale tip wholesale** without rebase — two-dot vs `dev` looks like a 2,300-line revert even though a 3-way merge is clean. |
+| #19 | **Retarget to `dev` and merge first among packaging** | Independent of coordinator code. Gives later waves pytest / hassfest / HACS Actions. CI already green vs `main`. After merge, add `dev` to `ci.yml` `push.branches` (today it only pytest-gates pushes to `main`). |
+| #22 | **Close after #24, or merge with a status edit** | Implementation is #24. The plan doc is worth keeping (bonding table, scan-gap risk, why not `sleep` in `async_poll`) if the header is changed from *proposal* to *implemented*. |
 | #25 | **Merge into `dev` before #24** | Larger window state machine. Easier to rebase grace onto it than the reverse. Fixes user-visible #23. |
 | #24 | **Rebase onto post-#25 `dev`, then merge** | Hard content conflicts with #25. Must be rewritten against the new window rules (see reconciliation). |
 | last-synchronized | **Open a PR to `dev` after #25+#24**, then merge | Additive sensor. `coordinator.py` auto-merges; `tests/test_coordinator.py` conflicts. |
@@ -129,15 +129,27 @@ one rebase.
 
 ### #18 (Cloud Agent environment)
 
-Retarget base `main` → `dev`. The three-dot diff vs current `dev` is:
+The branch is **24 commits behind `dev`**. Commits `857ad6f` (PR #9 entity
+split) and `5a0cc97` (CoordinatorEntity stub) are already ancestors of
+`dev`. `entity.py` / `test_entity.py` / README are **identical** to `dev`.
+The only unique commit is `0d369e7`.
+
+Preferred (avoids a misleading GitHub diff):
+
+```text
+git checkout dev
+git cherry-pick 0d369e7
+# or rebase the PR branch onto origin/dev, then retarget #18 → dev
+```
+
+Three-dot diff vs current `dev` is only:
 
 ```json
 { "name": "Veroval BLE",
   "install": "python3 -m pip install --user -r requirements-dev.txt -r requirements-hil.txt" }
 ```
 
-If GitHub still shows the old entity.py commit in the PR files list after
-retarget, reset the branch:
+If GitHub still lists entity.py after retarget, reset the branch:
 
 ```text
 git checkout -B cursor/setup-dev-environment-1bb8 origin/dev
@@ -160,6 +172,20 @@ Retarget base `main` → `dev`. `merge-tree` is clean. After merge:
 `CHANGELOG.md` in #19 starts at `0.1.0`. After Waves 1–2, add Unreleased
 notes for second-window, phone grace, `force_dump`, and last-synchronized
 before the `main` promotion.
+
+`ci.yml` in #19 only runs pytest on **pushes to `main`**. After the
+retarget, add `dev` so post-merge pushes to the integration branch are
+gated too:
+
+```yaml
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+```
+
+`validate.yml` already runs on all pushes and PRs.
 
 ## Wave 1 — combined coordinator state machine
 
@@ -191,16 +217,25 @@ POLL_WINDOW_GAP_SECONDS = 180         # already on dev; last-resort
 SERVICE_FORCE_DUMP = "force_dump"     # from #25
 ```
 
-### Flags on `VerovalBleDeviceData` (union)
+### Flags and helpers on `VerovalBleDeviceData` (union)
 
-| Field | Source | Role |
-|-------|--------|------|
+| Symbol | Source | Role |
+|--------|--------|------|
 | `_poll_lock` | existing | Held during GATT; unavailable is ignored |
 | `_polled_this_window` / `_window_polled_at` | existing | Dump (or skip) timestamp; 180 s backstop |
 | `_window_records` / `_consumed_slots` | existing | Shared dump across User 1 / User 2 |
-| `_grace_started_at` / `_window_skipped` | #24 | Phone-first wait and skip-on-disappear |
-| last-ad timestamp used for silence | #25 | 20 s gap → new window |
-| force-poll path | #25 | Ignore skip/grace; still one connect per MAC |
+| `_begin_new_window(reason)` | #25 | Single reset: cache, consumed, polled, `_awaiting_new_window` — **must also clear grace/skip** |
+| `_last_ad_time` / `_awaiting_new_window` | #25 | 20 s silence and idle-unavailable new window |
+| `_grace_started_at` / `_grace_address` / `_grace_elapsed_logged` / `_window_skipped` | #24 | Phone-first wait and skip-on-disappear |
+| `_grace_in_progress()` | #24 | True from first ad until dump or skip, **including after 60 s until connect** |
+| `async_force_poll` / `consume_shared_dump` | #25 | Manual sync; one GATT per MAC |
+
+**Policy decision (do not take #25’s immediate `return True` after
+`_begin_new_window`):** every *new GATT window* starts phone grace.
+Cache consume (User 2) and `force_dump` stay immediate. #25 today
+returns `True` right after ad-silence / idle-unavailable reset — that
+must change when #24 is rebased, or the second measurement beats
+medi.connect again.
 
 ### `poll_needed` decision order (after both land)
 
@@ -209,22 +244,29 @@ then decide whether to connect:
 
 1. 180 s since `_window_polled_at` → clear dump, grace, skip, consumed
    slots (same reset #24 already applies on gap expiry).
-2. Advertisement silence ≥ 20 s **and** not currently dumping → treat
-   as a **new** window: clear consumed/skip/grace, allow a new cycle.
-   (This is #25. It must also reset `#24` grace so the next cycle
-   waits 60 s again — do not dump immediately after silence if that
-   silence was “phone finished and cuff woke later.”)
-3. `_poll_lock` held → `False`.
-4. Cached records and this `cuff_user` not in `_consumed_slots` → `True`
-   (other slot consumes; no new connect).
-5. `_window_skipped` → `False` (phone grabbed this window).
-6. `_polled_this_window` → `False` unless #25’s idle-unavailable /
-   silence already opened a new window in step 2.
-7. Grace not started → set `_grace_started_at`, return `False`.
-8. Grace elapsed &lt; 60 s → `False`.
-9. Else → existing `last_poll` / `UPDATE_INTERVAL` (usually `True`).
+2. `_poll_lock` held → `False`.
+3. Advertisement silence ≥ 20 s **and** not currently dumping →
+   `_begin_new_window("advertisement silence")` (clears grace too),
+   then **fall through to grace** — do **not** `return True` here
+   (that is what #25 does today and must be changed).
+4. `_awaiting_new_window` and this `cuff_user` not yet consumed →
+   `True` (shared-cache consume, no new connect, no grace).
+   Else if `_awaiting_new_window` → `_begin_new_window("idle unavailable")`
+   and fall through to grace.
+5. Cached records and this `cuff_user` not in `_consumed_slots` → `True`.
+6. `_window_skipped` → `False` (phone grabbed this window).
+7. `_polled_this_window` → `False`.
+8. Grace not started → set `_grace_started_at`, return `False`.
+9. Grace elapsed &lt; 60 s → `False`.
+10. Else → existing `last_poll` / `UPDATE_INTERVAL` (usually `True`).
 
-`force_dump` skips steps 5–8.
+`force_dump` calls `_begin_new_window("force dump")` then `async_poll`
+and never consults this tree.
+
+While `_grace_in_progress()` is true, **do not** run the 20 s silence
+fast-reopen (a scanner gap during the 60 s wait must not dump).
+`AD_SILENCE` (20) &lt; `PHONE_GRACE` (60) &lt; `POLL_WINDOW_GAP` (180),
+but the grace gate — not the constant order — is what prevents that.
 
 ### `mark_window_ended` decision order
 
@@ -264,14 +306,17 @@ a new window.
 
 **New interaction tests (write these on the #24 rebase):**
 
-1. Dump completes (#25 window consumed) → idle unavailable → next ad
-   starts **grace**, not an immediate dump.
-2. During grace, 20 s of no ads then ads resume → still the **same**
-   grace (or skip if unavailable fired); do not open a new window
-   that dumps at once.
-3. `force_dump` during grace performs one GATT connect and publishes.
-4. Phone skip, then a later new advertise session (silence or idle
-   unavailable after the cuff was truly gone) starts a new grace.
+1. Dump → idle unavailable → next ad starts **grace**, not an
+   immediate dump (`test_consumed_slot_polls_again_after_idle_unavailable`
+   must be updated from #25’s immediate-`True` expectation).
+2. During grace, 20 s of no ads then ads resume → same grace (or skip
+   if unavailable fired); do not dump at once.
+3. `force_dump` during grace (or during `_window_skipped`) performs one
+   GATT connect and clears grace/skip.
+4. Continuous ads through 180 s gap → grace starts (not immediate dump);
+   dump only after +60 s.
+5. Grace unavailable does **not** set `_awaiting_new_window`.
+6. Shared grace: User 2 does not restart the 60 s wait.
 
 Clock-based `FakeClock` tests only — no real `sleep`.
 
@@ -324,7 +369,7 @@ Use **separate** Cloud Agents so each PR stays reviewable:
 
 | Wave | Agent job | Must not do |
 |------|-----------|-------------|
-| 0a | Retarget + merge #18 | Rewrite entity.py |
+| 0a | Cherry-pick `0d369e7` (or rebase #18 onto `dev`) | Merge the stale #18 tip; rewrite entity.py |
 | 0b | Retarget + merge #19 | Tag a release; delete HACS ignores before Settings exist |
 | 1a | Merge #25 (mark ready-for-review if still draft) | Rebase #24 in the same PR |
 | 1b | Rebase #24 onto post-#25 `dev`, implement combined state machine + interaction tests, merge | Force-merge the conflicting `coordinator.py` |
