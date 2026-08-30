@@ -100,11 +100,24 @@ Typical Core lines:
 
 The 6-digit PIN is not written to the log.
 
+## Force a dump (debug action)
+
+When the cuff is advertising but Home Assistant did not connect, grab the measurement immediately:
+
+1. Press **User 1** or **User 2** so Bluetooth flashes.
+2. **Developer tools → Actions**.
+3. Choose **Veroval Blood Pressure BLE: Force data sync** (`veroval_ble.force_dump`).
+4. Target the **BPU26 User 1** or **User 2** device (or leave the target empty to sync every configured slot).
+5. Turn on **See response** if you want the systolic / diastolic / pulse / timestamp in the result.
+6. **Perform action**.
+
+This ignores the advertise-window skip and starts a GATT dump now. If the cuff is not advertising, the action fails with *No connectable BPU26*. Look for `Force dump` / `Starting new advertise window (force dump)` in the log.
+
 ## Capture a measurement session
 
 1. Enable debug as above.
 2. Press **User 1** or **User 2** on the cuff so it advertises (~2 minutes).
-3. Wait for Home Assistant to connect and drain the dump.
+3. Wait for Home Assistant to connect and drain the dump (or run **Force data sync**).
 4. **Settings → System → Logs** → download the log.
 5. Disable debug logging.
 
