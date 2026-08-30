@@ -65,6 +65,11 @@ def _stub_homeassistant() -> None:
         def __init__(self, hass: object, logger: object, **kwargs: object) -> None:
             self.hass = hass
             self.logger = logger
+            self._available = False
+
+        @property
+        def available(self) -> bool:
+            return self._available
 
         def _async_handle_unavailable(self, service_info: object) -> None:
             return None
@@ -421,6 +426,15 @@ def test_coordinator_force_poll_updates_data() -> None:
     published = asyncio.run(run())
     assert published is result.selected
     assert coordinator.data is result.selected
+
+
+def test_is_advertising_follows_coordinator_available() -> None:
+    coordinator = _make_coordinator(VerovalBleDeviceData())
+    assert coordinator.is_advertising is False
+    coordinator._available = True
+    assert coordinator.is_advertising is True
+    coordinator._available = False
+    assert coordinator.is_advertising is False
 
 
 def test_first_poll_needed_starts_phone_grace() -> None:

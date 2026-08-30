@@ -7,6 +7,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -20,6 +21,13 @@ IRREGULAR_PULSE_DESCRIPTION = BinarySensorEntityDescription(
     icon="mdi:heart-pulse",
 )
 
+ADVERTISING_DESCRIPTION = BinarySensorEntityDescription(
+    key="advertising",
+    translation_key="advertising",
+    entity_category=EntityCategory.DIAGNOSTIC,
+    icon="mdi:bluetooth",
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -29,7 +37,10 @@ async def async_setup_entry(
     """Set up Veroval BLE binary sensors."""
     coordinator = entry.runtime_data
     async_add_entities(
-        [VerovalBleIrregularPulseSensor(coordinator, IRREGULAR_PULSE_DESCRIPTION)]
+        [
+            VerovalBleIrregularPulseSensor(coordinator, IRREGULAR_PULSE_DESCRIPTION),
+            VerovalBleAdvertisingSensor(coordinator, ADVERTISING_DESCRIPTION),
+        ]
     )
 
 
@@ -48,3 +59,22 @@ class VerovalBleIrregularPulseSensor(VerovalBleEntity, BinarySensorEntity):
         if measurement is None:
             return None
         return measurement.irregular_pulse
+
+
+class VerovalBleAdvertisingSensor(VerovalBleEntity, BinarySensorEntity):
+    """On while Home Assistant is receiving BPU26 advertisements."""
+
+    @property
+    def available(self) -> bool:
+        """Always shown so Off means the cuff is not advertising."""
+        return True
+
+    @property
+    def assumed_state(self) -> bool:
+        """Off is a real 'no advertisements' reading, not a stale last value."""
+        return False
+
+    @property
+    def is_on(self) -> bool:
+        """Return True while the coordinator is seeing advertisements."""
+        return self.coordinator.is_advertising

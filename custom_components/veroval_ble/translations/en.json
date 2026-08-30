@@ -94,6 +94,9 @@
     "binary_sensor": {
       "irregular_pulse": {
         "name": "Irregular pulse"
+      },
+      "advertising": {
+        "name": "Advertising"
       }
     }
   },

@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - New advertise window after idle unavailable or 20s advertisement silence (no 180s mute after setup). Fixes subsequent-measurement skip.
 - Developer action `veroval_ble.force_dump` to sync immediately, including during grace.
 - Last-synchronized diagnostic timestamp sensor per user slot.
+- Advertising diagnostic binary sensor: on while Home Assistant is capturing BPU26 advertisements.
 - Cloud Agent `environment.json`, HACS packaging (LICENSE, brand icon, CI, issue templates).
 
 ## [0.1.0] - 2026-08-29

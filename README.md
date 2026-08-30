@@ -97,6 +97,7 @@ After the cuff starts advertising, Home Assistant **waits 60 seconds** before co
 | Pulse | bpm |
 | Measured time | Cuff timestamp of the published reading |
 | Last synchronized | Home Assistant time of the last successful dump for this slot |
+| Advertising | Diagnostic: **on** while Home Assistant is receiving BPU26 advertisements (cuff live), **off** when the advertise window has ended |
 | User slot | Label **User 1** / **User 2** |
 | Irregular pulse | Binary sensor (not atrial fibrillation) |
 

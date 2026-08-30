@@ -371,6 +371,11 @@ class VerovalBleCoordinator(
         """Home Assistant time of the last successful dump for this cuff user."""
         return self.device_data.last_synchronized.get(self.cuff_user)
 
+    @property
+    def is_advertising(self) -> bool:
+        """True while Home Assistant is receiving BPU26 advertisements."""
+        return self.available
+
     def _async_needs_poll(
         self,
         service_info: BluetoothServiceInfoBleak,
