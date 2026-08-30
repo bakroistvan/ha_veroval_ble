@@ -124,7 +124,7 @@ This ignores the advertise-window skip **and the 60-second phone-first grace** a
 Typical coordinator lines:
 
 - `DEBUG` `Waiting 60s for phone app before polling aa:bb:…`
-- `DEBUG` `Phone grace elapsed; polling aa:bb:…`
+- `DEBUG` `Phone grace elapsed; polling aa:bb:…` / `(no further ads)`
 - `DEBUG` `Cuff disappeared during phone grace; skipping dump for aa:bb:…`
 - `DEBUG` `Starting new advertise window (advertisement silence)` / `(idle unavailable)`
 - `DEBUG` `Ignoring stale or cached advertisement for aa:bb:…`

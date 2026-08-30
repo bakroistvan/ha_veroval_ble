@@ -26,6 +26,8 @@ from .advertisement import advertisement_is_live, advertisement_monotonic_time
 from .client import dump_latest
 from .const import (
     AD_SILENCE_NEW_WINDOW_SECONDS,
+    CUFF_ADVERTISE_SECONDS,
+    DOMAIN,
     PHONE_GRACE_SECONDS,
     POLL_WINDOW_GAP_SECONDS,
     UPDATE_INTERVAL,
@@ -88,6 +90,7 @@ class VerovalBleDeviceData:
         self._polled_this_window = False
         self._window_polled_at: float | None = None
         self._last_ad_time: float | None = None
+        self._last_live_ad_time: float | None = None
         self._last_ad_stamp: float | None = None
         self._stale_ad_logged = False
         self._awaiting_new_window = False
@@ -96,11 +99,23 @@ class VerovalBleDeviceData:
         self._grace_started_at: float | None = None
         self._grace_address: str | None = None
         self._grace_elapsed_logged = False
+        self._grace_timer: object | None = None
         self._window_skipped = False
+
+    def cancel_grace_timer(self) -> None:
+        """Cancel the delayed dump that runs when HA sends no further ads."""
+        handle = self._grace_timer
+        if handle is None:
+            return
+        cancel = getattr(handle, "cancel", None)
+        if cancel is not None:
+            cancel()
+        self._grace_timer = None
 
     def _begin_new_window(self, reason: str) -> None:
         """Clear dump-skip and grace state so the next ad can start a GATT dump."""
         _LOGGER.debug("Starting new advertise window (%s)", reason)
+        self.cancel_grace_timer()
         self._polled_this_window = False
         self._window_polled_at = None
         self._window_records = None
@@ -151,12 +166,22 @@ class VerovalBleDeviceData:
         self._begin_new_window("poll-window gap expired")
 
     def is_advertising(self, now: float | None = None) -> bool:
-        """True if a live advertisement was accepted recently."""
-        if self._last_ad_time is None:
+        """True during the cuff's ~2 minute flash after the last live ad."""
+        if self._last_live_ad_time is None:
             return False
         if now is None:
             now = self._monotonic()
-        return now - self._last_ad_time < AD_SILENCE_NEW_WINDOW_SECONDS
+        return now - self._last_live_ad_time < CUFF_ADVERTISE_SECONDS
+
+    def grace_dump_due(self, now: float | None = None) -> bool:
+        """True when phone grace elapsed and no dump has run this window."""
+        if not self._grace_in_progress():
+            return False
+        if self._grace_started_at is None:
+            return False
+        if now is None:
+            now = self._monotonic()
+        return now - self._grace_started_at >= PHONE_GRACE_SECONDS
 
     def _advertisement_is_live(self, service_info: object, now: float) -> bool:
         """Return True if this callback is a real, new advertisement."""
@@ -200,6 +225,7 @@ class VerovalBleDeviceData:
         stamp = advertisement_monotonic_time(service_info)
         if stamp is not None:
             self._last_ad_stamp = stamp
+        self._last_live_ad_time = now
 
         self._expire_stale_window(now)
 
@@ -272,6 +298,7 @@ class VerovalBleDeviceData:
             return
         if self._grace_in_progress():
             label = address or self._grace_address or "unknown"
+            self.cancel_grace_timer()
             self._window_skipped = True
             self._window_polled_at = self._monotonic()
             self._grace_started_at = None
@@ -286,6 +313,7 @@ class VerovalBleDeviceData:
             self._window_polled_at = None
 
     def _mark_polled_this_window(self) -> None:
+        self.cancel_grace_timer()
         self._polled_this_window = True
         now = self._monotonic()
         self._window_polled_at = now
@@ -410,11 +438,10 @@ class VerovalBleCoordinator(
 
     @property
     def is_advertising(self) -> bool:
-        """True while a fresh BPU26 advertisement was seen recently.
+        """True during the cuff's ~2 minute flash after the last live ad.
 
-        Home Assistant's ``available`` flag stays true long after the cuff
-        sleeps because the scanner cache is still delivered. The advertising
-        sensor follows the last *live* advertisement, not that flag.
+        Home Assistant often delivers only one callback (or replays the same
+        scanner stamp). The sensor stays on for the flash period, not 20s.
         """
         return self.device_data.is_advertising()
 
@@ -429,16 +456,96 @@ class VerovalBleCoordinator(
         self._advertising_timer = None
 
     def _schedule_advertising_timer(self) -> None:
-        """Refresh entities after the live-ad window so the sensor can go off."""
+        """Refresh entities when the ~2 minute flash window should end."""
         self._cancel_advertising_timer()
+        last_live = self.device_data._last_live_ad_time
+        if last_live is None:
+            return
+        delay = (
+            CUFF_ADVERTISE_SECONDS
+            - (self.device_data._monotonic() - last_live)
+            + 0.5
+        )
+        if delay <= 0:
+            self.async_update_listeners()
+            return
         loop = getattr(self.hass, "loop", None)
         call_later = getattr(loop, "call_later", None)
         if call_later is None:
             return
         self._advertising_timer = call_later(
-            AD_SILENCE_NEW_WINDOW_SECONDS + 0.5,
-            self._async_advertising_timer_fired,
+            delay, self._async_advertising_timer_fired
         )
+
+    def _ensure_grace_timer(self) -> None:
+        """Dump after 60s even if Home Assistant sends no further advertisements."""
+        data = self.device_data
+        if not data._grace_in_progress() or data._grace_started_at is None:
+            return
+        if data._grace_timer is not None:
+            return
+        delay = max(
+            0.0,
+            PHONE_GRACE_SECONDS - (data._monotonic() - data._grace_started_at),
+        )
+        loop = getattr(self.hass, "loop", None)
+        call_later = getattr(loop, "call_later", None)
+        if call_later is None:
+            return
+        data._grace_timer = call_later(delay, self._async_grace_timer_fired)
+
+    @callback
+    def _async_grace_timer_fired(self) -> None:
+        """Phone grace elapsed; start the dump without waiting for another ad."""
+        self.device_data._grace_timer = None
+        create_task = getattr(self.hass, "async_create_task", None)
+        if create_task is None:
+            return
+        create_task(self._async_grace_elapsed_poll())
+
+    async def _async_grace_elapsed_poll(self) -> None:
+        """Connect after phone grace when advertisement callbacks have stopped."""
+        if not self.device_data.grace_dump_due():
+            return
+        if self.hass.state is not CoreState.running:
+            return
+        connectable_device = async_ble_device_from_address(
+            self.hass, self.address, connectable=True
+        )
+        if connectable_device is None:
+            _LOGGER.debug(
+                "Phone grace elapsed; no connectable BLEDevice for %s",
+                self.address,
+            )
+            return
+        _LOGGER.debug(
+            "Phone grace elapsed; polling %s cuff_user=%s (no further ads)",
+            self.address,
+            self.cuff_user,
+        )
+        measurement = await self.device_data.async_poll(
+            connectable_device, self.cuff_user
+        )
+        self._publish_shared_slots(measurement)
+
+    def _publish_shared_slots(
+        self, measurement: BloodPressureMeasurement | None
+    ) -> None:
+        """Publish this slot and let the other user consume the same dump."""
+        self.async_publish_measurement(measurement)
+        config_entries = getattr(self.hass, "config_entries", None)
+        async_entries = getattr(config_entries, "async_entries", None)
+        if async_entries is None:
+            return
+        for entry in async_entries(DOMAIN):
+            other = getattr(entry, "runtime_data", None)
+            if not isinstance(other, VerovalBleCoordinator) or other is self:
+                continue
+            if other.address.lower() != self.address.lower():
+                continue
+            other.async_publish_measurement(
+                other.device_data.consume_shared_dump(other.cuff_user)
+            )
 
     @callback
     def _async_advertising_timer_fired(self) -> None:
@@ -454,9 +561,11 @@ class VerovalBleCoordinator(
         """Poll when HA is running, a connectable path exists, and the dump is due."""
         if self.hass.state is not CoreState.running:
             return False
-        if not self.device_data.poll_needed(
+        needed = self.device_data.poll_needed(
             service_info, last_poll, self.cuff_user
-        ):
+        )
+        self._ensure_grace_timer()
+        if not needed:
             return False
         if async_ble_device_from_address(
             self.hass, service_info.device.address, connectable=True
@@ -544,6 +653,7 @@ class VerovalBleCoordinator(
         """Track RSSI from advertisements; never log them at INFO."""
         self.rssi = service_info.rssi
         super()._async_handle_bluetooth_event(service_info, change)
+        self._ensure_grace_timer()
         if self.device_data.is_advertising():
             self._schedule_advertising_timer()
         self.async_update_listeners()

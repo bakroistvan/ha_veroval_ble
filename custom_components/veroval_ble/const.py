@@ -15,10 +15,12 @@ LOCAL_NAME = "BPU26"
 
 DUMP_IDLE_SECONDS = 2.0
 DUMP_TIMEOUT_SECONDS = 30.0
-# No advertisements for this long → next ad is a new GATT window.
-# Longer than a brief scanner gap; shorter than a new measurement (~30–60s)
-# and the cuff's ~2 minute advertise period.
+# No *new* live advertisements for this long → next live ad is a new GATT window.
+# This is not how long the Advertising sensor stays on. HA often delivers only
+# one callback (or replays the same scanner stamp) for the whole flash.
 AD_SILENCE_NEW_WINDOW_SECONDS = 20
+# How long Advertising stays on after the last live advertisement (cuff flash).
+CUFF_ADVERTISE_SECONDS = 120
 # HA scanner cache can outlive BlueZ Device1; pairing needs a recent host ad.
 ADVERTISEMENT_MAX_AGE_SECONDS = 30.0
 # Last-resort expiry if HA keeps delivering ads and never marks unavailable.

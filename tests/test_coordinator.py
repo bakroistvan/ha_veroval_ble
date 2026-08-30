@@ -147,6 +147,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 
 _const, _parser, _coordinator = _load_coordinator()
 AD_SILENCE_NEW_WINDOW_SECONDS = _const.AD_SILENCE_NEW_WINDOW_SECONDS
+CUFF_ADVERTISE_SECONDS = _const.CUFF_ADVERTISE_SECONDS
 PHONE_GRACE_SECONDS = _const.PHONE_GRACE_SECONDS
 POLL_WINDOW_GAP_SECONDS = _const.POLL_WINDOW_GAP_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
@@ -447,6 +448,9 @@ def test_is_advertising_follows_last_live_ad_not_available() -> None:
 
     clock.now = AD_SILENCE_NEW_WINDOW_SECONDS
     coordinator._available = True
+    assert coordinator.is_advertising is True
+    clock.now = CUFF_ADVERTISE_SECONDS
+    coordinator._available = True
     assert coordinator.is_advertising is False
 
 
@@ -729,6 +733,8 @@ def test_stale_cached_ad_does_not_refresh_last_ad_time() -> None:
     assert data._grace_started_at == 100.0
 
     clock.now = 100.0 + AD_SILENCE_NEW_WINDOW_SECONDS
+    assert data.is_advertising() is True
+    clock.now = 100.0 + CUFF_ADVERTISE_SECONDS
     assert data.is_advertising() is False
 
 
@@ -770,3 +776,60 @@ def test_cached_ads_after_dump_do_not_block_next_window() -> None:
     clock.now = 200.0 + PHONE_GRACE_SECONDS
     later = SimpleNamespace(time=clock.now)
     assert data.poll_needed(later, None, 1) is True
+
+
+def test_grace_dump_due_without_second_advertisement() -> None:
+    """HA often sends only one live callback for the whole flash."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(SimpleNamespace(time=0.0), None) is False
+    assert data.grace_dump_due() is False
+    clock.now = PHONE_GRACE_SECONDS - 1
+    assert data.grace_dump_due() is False
+    clock.now = PHONE_GRACE_SECONDS
+    assert data.grace_dump_due() is True
+    assert data._polled_this_window is False
+
+
+def test_grace_timer_polls_without_second_ad() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    scheduled: list[tuple[float, object]] = []
+
+    class _Handle:
+        def cancel(self) -> None:
+            return None
+
+    def call_later(delay: float, callback: object) -> _Handle:
+        scheduled.append((delay, callback))
+        return _Handle()
+
+    tasks: list[object] = []
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(
+        loop=SimpleNamespace(call_later=call_later),
+        state=_coordinator.CoreState.running,
+        async_create_task=lambda coro: tasks.append(coro),
+    )
+
+    assert data.poll_needed(SimpleNamespace(time=0.0), None) is False
+    coordinator._ensure_grace_timer()
+    assert scheduled == [(PHONE_GRACE_SECONDS, coordinator._async_grace_timer_fired)]
+
+    dumps = {"n": 0}
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        dumps["n"] += 1
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    _coordinator.async_ble_device_from_address = (
+        lambda *args, **kwargs: _FakeBleDevice()
+    )
+
+    clock.now = PHONE_GRACE_SECONDS
+    coordinator._async_grace_timer_fired()
+    assert tasks
+    asyncio.run(tasks[0])
+    assert dumps["n"] == 1
+    assert data._polled_this_window is True
