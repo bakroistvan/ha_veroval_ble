@@ -80,7 +80,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -
         coordinator.async_start()
     )
     entry.async_on_unload(coordinator.async_start_bluez_rssi_watch())
-    await async_setup_services(hass)
+    async_setup_services(hass)
     return True
 
 
