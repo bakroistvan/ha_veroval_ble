@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 
 from bleak.backends.device import BLEDevice
 
@@ -64,14 +64,25 @@ def _address_lock(address: str) -> asyncio.Lock:
     return _ADDRESS_LOCKS[key]
 
 
+def _default_utcnow() -> datetime:
+    """Return aware UTC now (injectable in tests via VerovalBleDeviceData)."""
+    return datetime.now(timezone.utc)
+
+
 class VerovalBleDeviceData:
     """Connect, drain 0x2A35 indications, select newest record for one BLE user id."""
 
-    def __init__(self, monotonic: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        monotonic: Callable[[], float] = time.monotonic,
+        utcnow: Callable[[], datetime] = _default_utcnow,
+    ) -> None:
         """Initialize poll state."""
         self._monotonic = monotonic
+        self._utcnow = utcnow
         self._poll_lock = asyncio.Lock()
         self.last_measurement: dict[int, BloodPressureMeasurement] = {}
+        self.last_synchronized: dict[int, datetime] = {}
         self._last_published_timestamp: dict[int, datetime] = {}
         self._polled_this_window = False
         self._window_polled_at: float | None = None
@@ -305,6 +316,8 @@ class VerovalBleDeviceData:
         self._consumed_slots.add(cuff_user)
         if records:
             self._mark_polled_this_window()
+        # Dump consumed for this slot (shared window or fresh GATT).
+        self.last_synchronized[cuff_user] = self._utcnow()
         if selected is None:
             return self.last_measurement.get(cuff_user)
 
@@ -352,6 +365,11 @@ class VerovalBleCoordinator(
     def last_measurement(self) -> BloodPressureMeasurement | None:
         """Last published measurement for this coordinator's cuff user."""
         return self.device_data.last_measurement.get(self.cuff_user)
+
+    @property
+    def last_synchronized(self) -> datetime | None:
+        """Home Assistant time of the last successful dump for this cuff user."""
+        return self.device_data.last_synchronized.get(self.cuff_user)
 
     def _async_needs_poll(
         self,

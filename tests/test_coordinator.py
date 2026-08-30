@@ -571,3 +571,116 @@ def test_force_dump_clears_grace_and_skipped_window() -> None:
     assert published is not None
     assert data._window_skipped is False
     assert data._grace_started_at is None
+
+
+class _FakeUtc:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def test_successful_dump_sets_last_synchronized() -> None:
+    stamp = datetime(2024, 6, 1, 10, 0, 0)
+    utc = _FakeUtc(stamp)
+    data = VerovalBleDeviceData(utcnow=utc)
+    result = _dump_result()
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return result
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    asyncio.run(run())
+
+    assert data.last_synchronized[1] == stamp
+    assert _make_coordinator(data).last_synchronized == stamp
+
+
+def test_unchanged_cuff_timestamp_still_updates_last_synchronized() -> None:
+    first_stamp = datetime(2024, 6, 1, 10, 0, 0)
+    second_stamp = datetime(2024, 6, 1, 11, 0, 0)
+    utc = _FakeUtc(first_stamp)
+    data = VerovalBleDeviceData(utcnow=utc)
+    measurement = _sample_measurement()
+    result = _dump_result(records=[measurement], selected=measurement)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return result
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+        assert data.last_synchronized[1] == first_stamp
+        published = data.last_measurement[1]
+        utc.now = second_stamp
+        await data.async_force_poll(_FakeBleDevice(), cuff_user=1)
+        assert data.last_measurement[1] is published
+        assert data.last_synchronized[1] == second_stamp
+
+    asyncio.run(run())
+
+
+def test_auth_error_does_not_set_last_synchronized() -> None:
+    data = VerovalBleDeviceData(utcnow=_FakeUtc(datetime(2024, 6, 1, 10, 0, 0)))
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return SimpleNamespace(
+            auth_error=True,
+            missing_characteristic=False,
+            records=[],
+            selected=None,
+        )
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    asyncio.run(run())
+    assert data.last_synchronized == {}
+
+
+def test_empty_dump_does_not_set_last_synchronized() -> None:
+    data = VerovalBleDeviceData(utcnow=_FakeUtc(datetime(2024, 6, 1, 10, 0, 0)))
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return SimpleNamespace(
+            auth_error=False,
+            missing_characteristic=False,
+            records=[],
+            selected=None,
+        )
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    asyncio.run(run())
+    assert data.last_synchronized == {}
+
+
+def test_missing_characteristic_does_not_set_last_synchronized() -> None:
+    data = VerovalBleDeviceData(utcnow=_FakeUtc(datetime(2024, 6, 1, 10, 0, 0)))
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return SimpleNamespace(
+            auth_error=False,
+            missing_characteristic=True,
+            records=[],
+            selected=None,
+        )
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    asyncio.run(run())
+    assert data.last_synchronized == {}

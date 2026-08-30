@@ -96,6 +96,7 @@ After the cuff starts advertising, Home Assistant **waits 60 seconds** before co
 | Diastolic | mmHg |
 | Pulse | bpm |
 | Measured time | Cuff timestamp of the published reading |
+| Last synchronized | Home Assistant time of the last successful dump for this slot |
 | User slot | Label **User 1** / **User 2** |
 | Irregular pulse | Binary sensor (not atrial fibrillation) |
 

@@ -6,6 +6,16 @@ HACS shows the **GitHub Release tag** as the installed version. After editing th
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- 60-second phone-first grace so medi.connect can take the cuff before Home Assistant connects. Unavailable during the wait skips that window.
+- New advertise window after idle unavailable or 20s advertisement silence (no 180s mute after setup). Fixes subsequent-measurement skip.
+- Developer action `veroval_ble.force_dump` to sync immediately, including during grace.
+- Last-synchronized diagnostic timestamp sensor per user slot.
+- Cloud Agent `environment.json`, HACS packaging (LICENSE, brand icon, CI, issue templates).
+
 ## [0.1.0] - 2026-08-29
 
 ### Added

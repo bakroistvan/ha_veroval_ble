@@ -206,7 +206,20 @@ def test_dump_timeout_covers_full_two_user_stream() -> None:
 
 def test_two_coordinators_share_one_dump() -> None:
     """User 1 dump with mixed records; User 2 selects locally without a second GATT."""
-    data = VerovalBleDeviceData()
+    stamp1 = datetime(2024, 6, 1, 10, 0, 0)
+    stamp2 = datetime(2024, 6, 1, 10, 0, 5)
+
+    class _Utc:
+        def __init__(self) -> None:
+            self.values = [stamp1, stamp2]
+            self.i = 0
+
+        def __call__(self) -> datetime:
+            value = self.values[min(self.i, len(self.values) - 1)]
+            self.i += 1
+            return value
+
+    data = VerovalBleDeviceData(utcnow=_Utc())
     user1_latest = _measurement(
         user_id=BLE_USER_1,
         timestamp=datetime(2024, 1, 15, 12, 0, 0),
@@ -248,11 +261,28 @@ def test_two_coordinators_share_one_dump() -> None:
     assert second is user2_latest
     assert coord1.last_measurement is user1_latest
     assert coord2.last_measurement is user2_latest
+    assert data.last_synchronized[CUFF_USER_1] == stamp1
+    assert data.last_synchronized[CUFF_USER_2] == stamp2
+    assert coord1.last_synchronized == stamp1
+    assert coord2.last_synchronized == stamp2
 
 
-def test_truncated_dump_user_2_does_not_reconnect() -> None:
-    """Timeout can leave only User 1 records; User 2 must not start a second connect."""
-    data = VerovalBleDeviceData()
+def test_truncated_dump_user_2_still_stamps_last_synchronized() -> None:
+    """User 2 consuming a shared dump with no User 2 records still stamps sync."""
+    stamp1 = datetime(2024, 6, 1, 10, 0, 0)
+    stamp2 = datetime(2024, 6, 1, 10, 0, 5)
+
+    class _Utc:
+        def __init__(self) -> None:
+            self.values = [stamp1, stamp2]
+            self.i = 0
+
+        def __call__(self) -> datetime:
+            value = self.values[min(self.i, len(self.values) - 1)]
+            self.i += 1
+            return value
+
+    data = VerovalBleDeviceData(utcnow=_Utc())
     user1 = _measurement(
         user_id=BLE_USER_1,
         timestamp=datetime(2024, 1, 15, 12, 0, 0),
@@ -271,6 +301,8 @@ def test_truncated_dump_user_2_does_not_reconnect() -> None:
     assert first is user1
     assert second is None
     assert data.last_measurement.get(CUFF_USER_2) is None
+    assert data.last_synchronized[CUFF_USER_1] == stamp1
+    assert data.last_synchronized[CUFF_USER_2] == stamp2
 
 
 def test_user_1_last_measurement_unchanged_after_user_2_poll() -> None:
