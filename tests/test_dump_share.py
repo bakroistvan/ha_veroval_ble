@@ -132,7 +132,6 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 _const, _parser, _coordinator = _load_coordinator()
 DUMP_IDLE_SECONDS = _const.DUMP_IDLE_SECONDS
 DUMP_TIMEOUT_SECONDS = _const.DUMP_TIMEOUT_SECONDS
-POLL_WINDOW_GAP_SECONDS = _const.POLL_WINDOW_GAP_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
 VerovalBleCoordinator = _coordinator.VerovalBleCoordinator
 BloodPressureMeasurement = _parser.BloodPressureMeasurement
@@ -390,10 +389,10 @@ def test_needs_poll_passes_cuff_user() -> None:
 
 
 def test_window_end_allows_new_dump_and_clears_cache() -> None:
-    """Consumed slots must not block the next advertise window forever.
+    """Consumed slots must not block the next advertise window.
 
     mark_window_ended keeps the dump cache so User 2 can still consume it.
-    A new GATT dump starts after POLL_WINDOW_GAP_SECONDS expires the cache.
+    The next advertisement for a consumed slot starts a new GATT dump.
     """
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
@@ -430,12 +429,8 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
         await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
         data.mark_window_ended()
         assert data._window_records is not None
-        assert data.poll_needed(object(), None) is False
-        assert data.poll_needed(object(), None, CUFF_USER_1) is False
-        clock.now = POLL_WINDOW_GAP_SECONDS
-        assert data.poll_needed(object(), None) is True
-        assert data._window_records is None
         assert data.poll_needed(object(), None, CUFF_USER_1) is True
+        assert data._window_records is None
         return await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
 
     published = asyncio.run(run())
@@ -445,3 +440,27 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
     assert data.last_measurement[CUFF_USER_2] is first_user2
     assert data._window_records == [second_user1]
     assert data._consumed_slots == {CUFF_USER_1}
+
+
+def test_idle_unavailable_user_2_still_consumes_cache() -> None:
+    """User 2 can still take the shared dump after idle unavailable."""
+    data = VerovalBleDeviceData()
+    user1 = _measurement(
+        user_id=BLE_USER_1,
+        timestamp=datetime(2024, 1, 15, 12, 0, 0),
+    )
+    user2 = _measurement(
+        user_id=BLE_USER_2,
+        timestamp=datetime(2024, 1, 14, 9, 30, 0),
+        systolic=130.0,
+    )
+    _patch_dump([user1, user2])
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+
+    asyncio.run(run())
+    data.mark_window_ended()
+    assert data.poll_needed(object(), None, CUFF_USER_2) is True
+    assert data._window_records is not None
+    assert CUFF_USER_1 in data._consumed_slots

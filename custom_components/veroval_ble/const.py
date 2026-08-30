@@ -13,8 +13,11 @@ LOCAL_NAME = "BPU26"
 
 DUMP_IDLE_SECONDS = 2.0
 DUMP_TIMEOUT_SECONDS = 30.0
-# Gap after a dump before advertisements may start another window.
-# Longer than the cuff advertise period; independent of DUMP_TIMEOUT_SECONDS.
+# No advertisements for this long → next ad is a new GATT window.
+# Longer than a brief scanner gap; shorter than a new measurement (~30–60s)
+# and the cuff's ~2 minute advertise period.
+AD_SILENCE_NEW_WINDOW_SECONDS = 20
+# Last-resort expiry if HA keeps delivering ads and never marks unavailable.
 POLL_WINDOW_GAP_SECONDS = 180
 SCAN_TIMEOUT_SECONDS = 60
 UPDATE_INTERVAL = 10

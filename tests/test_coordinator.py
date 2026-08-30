@@ -130,6 +130,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 
 
 _const, _parser, _coordinator = _load_coordinator()
+AD_SILENCE_NEW_WINDOW_SECONDS = _const.AD_SILENCE_NEW_WINDOW_SECONDS
 POLL_WINDOW_GAP_SECONDS = _const.POLL_WINDOW_GAP_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
 VerovalBleCoordinator = _coordinator.VerovalBleCoordinator
@@ -208,10 +209,12 @@ def test_unavailable_while_poll_lock_held_does_not_clear_flag() -> None:
             coordinator._async_handle_unavailable(object())
             assert data._polled_this_window is True
             assert data._window_polled_at == 10.0
+            assert data._awaiting_new_window is False
 
     asyncio.run(run())
     assert data._polled_this_window is True
     assert data._window_polled_at == 10.0
+    assert data._awaiting_new_window is False
 
 
 def test_unavailable_while_idle_clears_flag() -> None:
@@ -224,7 +227,9 @@ def test_unavailable_while_idle_clears_flag() -> None:
 
     assert data._polled_this_window is False
     assert data._window_polled_at is None
+    assert data._awaiting_new_window is True
     assert data.poll_needed(object(), None) is True
+    assert data._awaiting_new_window is False
 
 
 def test_poll_needed_true_again_after_window_gap() -> None:
@@ -232,8 +237,11 @@ def test_poll_needed_true_again_after_window_gap() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     data._polled_this_window = True
     data._window_polled_at = 0.0
+    data._last_ad_time = 0.0
 
     clock.now = POLL_WINDOW_GAP_SECONDS - 1
+    # Keep last_ad fresh so silence does not open a window before the gap.
+    data._last_ad_time = clock.now
     assert data.poll_needed(object(), None) is False
     assert data._polled_this_window is True
 
@@ -241,3 +249,75 @@ def test_poll_needed_true_again_after_window_gap() -> None:
     assert data.poll_needed(object(), None) is True
     assert data._polled_this_window is False
     assert data._window_polled_at is None
+
+
+def test_consumed_slot_polls_again_after_idle_unavailable() -> None:
+    """Issue #23: next advertise window after setup dump must not be muted."""
+    clock = _FakeClock(50.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    result = _dump_result()
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return result
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    asyncio.run(run())
+    assert data.poll_needed(object(), None, 1) is False
+
+    data.mark_window_ended()
+    assert data._window_records is not None
+    assert data._awaiting_new_window is True
+    assert data.poll_needed(object(), None, 1) is True
+    assert data._window_records is None
+    assert data._consumed_slots == set()
+    assert data._awaiting_new_window is False
+
+
+def test_advertisement_silence_starts_new_window() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    result = _dump_result()
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return result
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    asyncio.run(run())
+
+    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS - 1
+    assert data.poll_needed(object(), None, 1) is False
+    assert data._window_records is not None
+
+    clock.now += AD_SILENCE_NEW_WINDOW_SECONDS
+    assert data.poll_needed(object(), None, 1) is True
+    assert data._window_records is None
+    assert data._polled_this_window is False
+
+
+def test_same_window_ads_do_not_start_new_dump() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    result = _dump_result()
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return result
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    asyncio.run(run())
+
+    for offset in (1.0, 5.0, 10.0, 19.0):
+        clock.now = offset
+        assert data.poll_needed(object(), None, 1) is False
+    assert data._window_records is not None
