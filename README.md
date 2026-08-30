@@ -112,6 +112,8 @@ See **[docs/DEBUG.md](docs/DEBUG.md)** for debug logging (UI, YAML, and `logger.
 
 Typical causes: advertise window expired (press User 1/2 again), host not paired/trusted, medi.connect or a phone still bonded, or Bluetooth Proxy used instead of the host adapter.
 
+To force a dump while Bluetooth is flashing: **Developer tools → Actions → Veroval Blood Pressure BLE: Force data sync** (`veroval_ble.force_dump`). See **[docs/DEBUG.md](docs/DEBUG.md)**.
+
 ## Protocol and captures
 
 - [docs/protocol.md](docs/protocol.md) — decoded BLE protocol

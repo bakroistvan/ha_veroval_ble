@@ -39,6 +39,10 @@ _LOGGER = logging.getLogger(__name__)
 _ADDRESS_LOCKS: dict[str, asyncio.Lock] = {}
 
 
+class CuffNotConnectableError(RuntimeError):
+    """Raised when a force dump cannot resolve a connectable BLEDevice."""
+
+
 def _address_lock(address: str) -> asyncio.Lock:
     """Return a shared lock so two user-slot entries do not connect at once."""
     key = address.lower()
@@ -172,6 +176,24 @@ class VerovalBleDeviceData:
             async with _address_lock(ble_device.address):
                 return await self._async_poll_locked(ble_device, cuff_user)
 
+    async def async_force_poll(
+        self, ble_device: BLEDevice, cuff_user: int
+    ) -> BloodPressureMeasurement | None:
+        """Clear window skip and dump now (debug / manual sync)."""
+        self._begin_new_window("force dump")
+        return await self.async_poll(ble_device, cuff_user)
+
+    def consume_shared_dump(
+        self, cuff_user: int
+    ) -> BloodPressureMeasurement | None:
+        """Publish this slot from the dump already in memory (no connect)."""
+        if (
+            self._window_records is None
+            or cuff_user in self._consumed_slots
+        ):
+            return self.last_measurement.get(cuff_user)
+        return self._publish_from_records(self._window_records, cuff_user)
+
     async def _async_poll_locked(
         self, ble_device: BLEDevice, cuff_user: int
     ) -> BloodPressureMeasurement | None:
@@ -246,6 +268,7 @@ class VerovalBleCoordinator(
             poll_method=self._async_poll_service,
             connectable=False,
         )
+        self.address = address
 
     @property
     def last_measurement(self) -> BloodPressureMeasurement | None:
@@ -296,6 +319,28 @@ class VerovalBleCoordinator(
             cuff_user_to_ble_id(self.cuff_user),
         )
         return await self.device_data.async_poll(connectable_device, self.cuff_user)
+
+    async def async_force_poll(self) -> BloodPressureMeasurement | None:
+        """Connect now and drain the dump, ignoring advertise-window skip."""
+        connectable_device = async_ble_device_from_address(
+            self.hass, self.address, connectable=True
+        )
+        if connectable_device is None:
+            raise CuffNotConnectableError(
+                f"No connectable BPU26 at {self.address}. "
+                "Press User 1 or User 2 so Bluetooth flashes."
+            )
+        _LOGGER.info(
+            "Force dump %s cuff_user=%s ble_user_id=%s",
+            connectable_device.address,
+            self.cuff_user,
+            cuff_user_to_ble_id(self.cuff_user),
+        )
+        measurement = await self.device_data.async_force_poll(
+            connectable_device, self.cuff_user
+        )
+        self.async_set_updated_data(measurement)
+        return measurement
 
     @callback
     def _async_handle_unavailable(

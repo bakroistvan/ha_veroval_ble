@@ -1,0 +1,6 @@
+force_dump:
+  name: Force data sync
+  description: Connect now and drain stored measurements, ignoring the advertise-window skip. Press User 1 or User 2 so Bluetooth flashes first.
+  target:
+    device:
+      integration: veroval_ble

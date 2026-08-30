@@ -15,6 +15,7 @@ from .coordinator import (
     VerovalBleCoordinator,
     VerovalBleDeviceData,
 )
+from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -
         # Start after platforms have subscribed to coordinator updates.
         coordinator.async_start()
     )
+    await async_setup_services(hass)
     return True
 
 
@@ -94,6 +96,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) 
             domain_data.pop(address, None)
             if not domain_data:
                 hass.data.pop(DOMAIN, None)
+    remaining = [
+        other
+        for other in hass.config_entries.async_entries(DOMAIN)
+        if other.entry_id != entry.entry_id
+        and getattr(other, "runtime_data", None) is not None
+    ]
+    if not remaining:
+        async_unload_services(hass)
     return True
 
 

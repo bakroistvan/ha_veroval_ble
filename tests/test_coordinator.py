@@ -69,6 +69,9 @@ def _stub_homeassistant() -> None:
         def _async_handle_unavailable(self, service_info: object) -> None:
             return None
 
+        def async_set_updated_data(self, data: object) -> None:
+            self.data = data
+
     active.ActiveBluetoothDataUpdateCoordinator = ActiveBluetoothDataUpdateCoordinator
 
     class ConfigEntry:
@@ -321,3 +324,84 @@ def test_same_window_ads_do_not_start_new_dump() -> None:
         clock.now = offset
         assert data.poll_needed(object(), None, 1) is False
     assert data._window_records is not None
+
+
+def test_force_poll_dumps_again_while_window_still_open() -> None:
+    data = VerovalBleDeviceData()
+    first = _sample_measurement()
+    second = BloodPressureMeasurement(
+        flags=0x1E,
+        systolic=122.0,
+        diastolic=81.0,
+        mean_arterial=94.0,
+        timestamp=datetime(2024, 1, 16, 8, 0, 0),
+        pulse=70.0,
+        user_id=0,
+        status=0,
+        raw=b"",
+    )
+    dumps = [
+        _dump_result(records=[first], selected=first),
+        _dump_result(records=[second], selected=second),
+    ]
+    calls = {"n": 0}
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        result = dumps[min(calls["n"], len(dumps) - 1)]
+        calls["n"] += 1
+        return result
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> object:
+        await data.async_poll(_FakeBleDevice(), cuff_user=1)
+        assert data.poll_needed(object(), None, 1) is False
+        return await data.async_force_poll(_FakeBleDevice(), cuff_user=1)
+
+    published = asyncio.run(run())
+    assert calls["n"] == 2
+    assert published is second
+    assert data.last_measurement[1] is second
+
+
+def test_coordinator_force_poll_requires_connectable_device() -> None:
+    data = VerovalBleDeviceData()
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace()
+    previous = _coordinator.async_ble_device_from_address
+    _coordinator.async_ble_device_from_address = lambda *args, **kwargs: None
+    try:
+
+        async def run() -> None:
+            await coordinator.async_force_poll()
+
+        try:
+            asyncio.run(run())
+        except _coordinator.CuffNotConnectableError as err:
+            assert "AA:BB:CC:DD:EE:FF" in str(err)
+        else:
+            raise AssertionError("expected CuffNotConnectableError")
+    finally:
+        _coordinator.async_ble_device_from_address = previous
+
+
+def test_coordinator_force_poll_updates_data() -> None:
+    data = VerovalBleDeviceData()
+    result = _dump_result()
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace()
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return result
+
+    _coordinator.dump_latest = fake_dump
+    _coordinator.async_ble_device_from_address = (
+        lambda *args, **kwargs: _FakeBleDevice()
+    )
+
+    async def run() -> object:
+        return await coordinator.async_force_poll()
+
+    published = asyncio.run(run())
+    assert published is result.selected
+    assert coordinator.data is result.selected

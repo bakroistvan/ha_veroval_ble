@@ -1,0 +1,7 @@
+{
+  "services": {
+    "force_dump": {
+      "service": "mdi:bluetooth-connect"
+    }
+  }
+}
