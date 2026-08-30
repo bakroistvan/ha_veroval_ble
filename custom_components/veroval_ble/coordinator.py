@@ -339,8 +339,20 @@ class VerovalBleCoordinator(
         measurement = await self.device_data.async_force_poll(
             connectable_device, self.cuff_user
         )
-        self.async_set_updated_data(measurement)
+        self.async_publish_measurement(measurement)
         return measurement
+
+    @callback
+    def async_publish_measurement(
+        self, measurement: BloodPressureMeasurement | None
+    ) -> None:
+        """Push a dump result to entities.
+
+        ``ActiveBluetoothDataUpdateCoordinator`` is not a
+        ``DataUpdateCoordinator`` and has no ``async_set_updated_data``.
+        """
+        self.data = measurement
+        self.async_update_listeners()
 
     @callback
     def _async_handle_unavailable(

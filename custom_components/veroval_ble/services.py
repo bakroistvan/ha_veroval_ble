@@ -110,7 +110,7 @@ async def async_force_dump_coordinators(
                 measurement = coordinator.device_data.consume_shared_dump(
                     coordinator.cuff_user
                 )
-                coordinator.async_set_updated_data(measurement)
+                coordinator.async_publish_measurement(measurement)
             else:
                 measurement = await coordinator.async_force_poll()
                 dumped_addresses.add(address)

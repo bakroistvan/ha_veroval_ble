@@ -107,6 +107,9 @@ def _stub_modules() -> None:
         def async_set_updated_data(self, data: object) -> None:
             self.data = data
 
+        def async_update_listeners(self) -> None:
+            return None
+
         def _async_handle_unavailable(self, service_info: object) -> None:
             return None
 

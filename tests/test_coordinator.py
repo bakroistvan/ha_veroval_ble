@@ -72,6 +72,9 @@ def _stub_homeassistant() -> None:
         def async_set_updated_data(self, data: object) -> None:
             self.data = data
 
+        def async_update_listeners(self) -> None:
+            return None
+
     active.ActiveBluetoothDataUpdateCoordinator = ActiveBluetoothDataUpdateCoordinator
 
     class ConfigEntry:
