@@ -19,6 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - Cached Bluetooth advertisements no longer keep the advertise window open after the cuff sleeps, so a later measurement can start a new dump. Stale discoveries no longer show an Add card.
+- `force_dump` uses a device selector (hassfest no longer allows a device filter on `target`).
 - Cloud Agent `environment.json`, HACS packaging (LICENSE, brand icon, CI, issue templates).
 
 ## [0.1.0] - 2026-08-29

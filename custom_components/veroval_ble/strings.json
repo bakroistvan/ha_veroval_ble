@@ -104,7 +104,13 @@
   "services": {
     "force_dump": {
       "name": "Force data sync",
-      "description": "Connect now and drain stored measurements, ignoring the advertise-window skip. Press User 1 or User 2 so Bluetooth flashes first."
+      "description": "Connect now and drain stored measurements, ignoring the advertise-window skip. Press User 1 or User 2 so Bluetooth flashes first.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "User slot to sync. Leave empty to sync every configured BPU26."
+        }
+      }
     }
   }
 }
