@@ -446,7 +446,7 @@ def test_is_advertising_follows_last_live_ad_not_available() -> None:
     assert data.poll_needed(live, None) is False
     assert coordinator.is_advertising is True
 
-    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS
+    clock.now = CUFF_ADVERTISE_SECONDS - 1
     coordinator._available = True
     assert coordinator.is_advertising is True
     clock.now = CUFF_ADVERTISE_SECONDS
@@ -577,7 +577,8 @@ def test_silence_during_grace_does_not_open_new_window() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     assert data.poll_needed(object(), None) is False
     started = data._grace_started_at
-    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS + 5
+    # Past a typical scanner gap, still inside phone grace (dump must not start).
+    clock.now = PHONE_GRACE_SECONDS - 1
     assert data.poll_needed(object(), None) is False
     assert data._grace_started_at == started
     assert data._window_skipped is False
@@ -732,7 +733,7 @@ def test_stale_cached_ad_does_not_refresh_last_ad_time() -> None:
     assert data._last_ad_time == 100.0
     assert data._grace_started_at == 100.0
 
-    clock.now = 100.0 + AD_SILENCE_NEW_WINDOW_SECONDS
+    clock.now = 100.0 + CUFF_ADVERTISE_SECONDS - 1
     assert data.is_advertising() is True
     clock.now = 100.0 + CUFF_ADVERTISE_SECONDS
     assert data.is_advertising() is False

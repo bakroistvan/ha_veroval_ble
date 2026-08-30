@@ -14,13 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - New advertise window after idle unavailable or 20s advertisement silence (no 180s mute after setup). Fixes subsequent-measurement skip.
 - Developer action `veroval_ble.force_dump` to sync immediately, including during grace.
 - Last-synchronized diagnostic timestamp sensor per user slot.
-- Advertising diagnostic binary sensor: on only while a *fresh* BPU26 advertisement was seen (about 20 seconds), not while Home Assistant’s scanner cache keeps the device “available”.
+- Advertising diagnostic binary sensor: on while a *fresh* BPU26 advertisement or host RSSI is recent, not while Home Assistant’s scanner cache keeps the device “available”.
 
 ### Fixed
 
 - Cached Bluetooth advertisements no longer keep the advertise window open after the cuff sleeps, so a later measurement can start a new dump. Stale discoveries no longer show an Add card.
 - `force_dump` uses a device selector (hassfest no longer allows a device filter on `target`).
-- Advertising stays on for the cuff’s ~2 minute flash (not 20s). A 60s phone-grace timer starts the dump even when Home Assistant sends no further advertisements.
+- Advertising turns off a few seconds after the last live sighting (not a full 2-minute linger after the cuff sleeps). A 60s phone-grace timer starts the dump even when Home Assistant sends no further advertisements.
 - Cloud Agent `environment.json`, HACS packaging (LICENSE, brand icon, CI, issue templates).
 
 ## [0.1.0] - 2026-08-29

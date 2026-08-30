@@ -24,24 +24,24 @@ DUMP_TIMEOUT_SECONDS = 30.0
 # Also the coordinator live-ad max age (older cache is ignored). This is not
 # how long the Advertising sensor stays on. HA often delivers only one callback
 # (or replays the same scanner stamp) for the whole flash.
-# Range: 10–40 s. Must be > BLUEZ_RSSI_POLL_SECONDS and << CUFF_ADVERTISE_SECONDS.
+# Range: 10–40 s. Must be > BLUEZ_RSSI_POLL_SECONDS and well below the ~120 s flash.
 AD_SILENCE_NEW_WINDOW_SECONDS = 20
 # Advertising stays on this long after the *last* live sighting (HA ad or BlueZ
-# RSSI). Cuff flash is ~2 min. One HA callback at the start → 120 s matches the
-# flash. Continuous RSSI refresh → the sensor lingers this long after ads stop.
-# Range: 90–150 s for the single-callback case; 5–20 s if sightings keep arriving.
-CUFF_ADVERTISE_SECONDS = 120
+# RSSI). RSSI/ads refresh while the cuff flashes; when it sleeps, the sensor
+# turns off after this linger — not after a full 2 min.
+# Range: 6–15 s (a few missed RSSI polls). Longer than BLUEZ_RSSI_POLL_SECONDS.
+CUFF_ADVERTISE_SECONDS = 10
 # Config-flow pairing only: HA scanner cache can outlive BlueZ Device1.
-# Range: 10–60 s. Must be < CUFF_ADVERTISE_SECONDS. Not used for dumps.
+# Range: 10–60 s. Must be well below the ~120 s cuff flash. Not used for dumps.
 ADVERTISEMENT_MAX_AGE_SECONDS = 30.0
 # Last-resort expiry if HA keeps delivering ads and never marks unavailable.
-# Range: 150–240 s. Must be > CUFF_ADVERTISE_SECONDS so a second dump cannot
-# start in the same ~2 min flash.
+# Range: 150–240 s. Must be longer than the ~120 s cuff flash so a second dump
+# cannot start in the same window. Independent of CUFF_ADVERTISE_SECONDS.
 POLL_WINDOW_GAP_SECONDS = 180
 # Wait after the first advertisement of a new GATT window so medi.connect
 # can take the transfer. Cache consume and force_dump skip this wait.
-# Range: 0–60 s (0 = dump immediately). 60 s is the top of the useful range:
-# grace + DUMP_TIMEOUT_SECONDS must stay under the ~120 s flash.
+# Range: 0–60 s (0 = dump immediately). 20 s leaves ~100 s of the flash for
+# connect + dump. grace + DUMP_TIMEOUT_SECONDS must stay under the ~120 s flash.
 PHONE_GRACE_SECONDS = 20
 # BlueZ Device1 RSSI is present only while the cuff is transmitting. Poll it
 # when HA's scanner delivers no BluetoothServiceInfoBleak (duplicate filter).

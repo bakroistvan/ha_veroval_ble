@@ -179,7 +179,7 @@ class VerovalBleDeviceData:
         self._begin_new_window("poll-window gap expired")
 
     def is_advertising(self, now: float | None = None) -> bool:
-        """True during the cuff's ~2 minute flash after the last live ad."""
+        """True while a live sighting is still recent (not the full 2 min flash)."""
         if self._last_live_ad_time is None:
             return False
         if now is None:
@@ -452,10 +452,10 @@ class VerovalBleCoordinator(
 
     @property
     def is_advertising(self) -> bool:
-        """True during the cuff's ~2 minute flash after the last live ad.
+        """True while the last live sighting (HA ad or BlueZ RSSI) is still recent.
 
-        Home Assistant often delivers only one callback (or replays the same
-        scanner stamp). The sensor stays on for the flash period, not 20s.
+        Sightings keep arriving while the cuff flashes. After it sleeps, the
+        sensor turns off in ``CUFF_ADVERTISE_SECONDS``, not a full 2 minutes.
         """
         return self.device_data.is_advertising()
 
@@ -470,7 +470,7 @@ class VerovalBleCoordinator(
         self._advertising_timer = None
 
     def _schedule_advertising_timer(self) -> None:
-        """Refresh entities when the ~2 minute flash window should end."""
+        """Refresh entities when the advertising linger after last sighting ends."""
         self._cancel_advertising_timer()
         last_live = self.device_data._last_live_ad_time
         if last_live is None:

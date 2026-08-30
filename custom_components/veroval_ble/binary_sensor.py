@@ -62,7 +62,7 @@ class VerovalBleIrregularPulseSensor(VerovalBleEntity, BinarySensorEntity):
 
 
 class VerovalBleAdvertisingSensor(VerovalBleEntity, BinarySensorEntity):
-    """On during the cuff's ~2 minute flash after the last live advertisement."""
+    """On while a live BPU26 sighting is recent; off shortly after the cuff sleeps."""
 
     @property
     def available(self) -> bool:
