@@ -101,7 +101,7 @@ def _connection_values(device_info: dict) -> set[str]:
 def test_device_info_identifiers_include_cuff_user_slot() -> None:
     address = "AA:BB:CC:DD:EE:FF"
     info = _device_info(address, cuff_user=1)
-    assert info["identifiers"] == {(DOMAIN, f"{address}_1")}
+    assert info["identifiers"] == {(DOMAIN, f"{address.lower()}_1")}
     assert info["name"] == "BPU26 User 1"
 
 
@@ -117,7 +117,7 @@ def test_user_slots_use_distinct_identifiers_so_registry_does_not_merge() -> Non
     user1 = _device_info(address, cuff_user=1)
     user2 = _device_info(address, cuff_user=2)
     assert user1["identifiers"] != user2["identifiers"]
-    assert user1["identifiers"] == {(DOMAIN, f"{address}_1")}
-    assert user2["identifiers"] == {(DOMAIN, f"{address}_2")}
+    assert user1["identifiers"] == {(DOMAIN, f"{address.lower()}_1")}
+    assert user2["identifiers"] == {(DOMAIN, f"{address.lower()}_2")}
     shared_connections = _connection_values(user1) & _connection_values(user2)
     assert address not in shared_connections

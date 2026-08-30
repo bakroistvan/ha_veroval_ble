@@ -833,3 +833,45 @@ def test_grace_timer_polls_without_second_ad() -> None:
     asyncio.run(tasks[0])
     assert dumps["n"] == 1
     assert data._polled_this_window is True
+
+
+def test_coordinator_registers_uppercase_address() -> None:
+    data = VerovalBleDeviceData()
+    coordinator = VerovalBleCoordinator(
+        hass=SimpleNamespace(),
+        address="aa:bb:cc:dd:ee:ff",
+        cuff_user=1,
+        device_data=data,
+    )
+    assert coordinator.address == "AA:BB:CC:DD:EE:FF"
+
+
+def test_bluez_rssi_after_idle_starts_advertising() -> None:
+    """HA cache replay is not live; BlueZ Device1 RSSI is."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+    data._last_ad_time = 0.0
+    data._last_ad_stamp = 0.0
+    clock.now = 10_000.0
+    assert data.poll_needed(SimpleNamespace(time=0.0), None, 1) is False
+    assert data.is_advertising() is False
+
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    coordinator.async_handle_bluez_rssi(-54)
+    assert coordinator.rssi == -54
+    assert coordinator.is_advertising is True
+    assert data._grace_started_at == 10_000.0
+
+
+def test_bluez_rssi_watch_is_noop_without_create_task() -> None:
+    coordinator = _make_coordinator(VerovalBleDeviceData())
+    coordinator.hass = SimpleNamespace()
+    stop = coordinator.async_start_bluez_rssi_watch()
+    stop()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 DOMAIN = "veroval_ble"
 
+
 CONF_CUFF_USER = "cuff_user"
 CONF_PIN = "pin"
 
@@ -28,5 +29,13 @@ POLL_WINDOW_GAP_SECONDS = 180
 # Wait after the first advertisement of a new GATT window so medi.connect
 # can take the transfer. Cache consume and force_dump skip this wait.
 PHONE_GRACE_SECONDS = 60
+# BlueZ Device1 RSSI is present only while the cuff is transmitting. Poll it
+# when HA's scanner delivers no BluetoothServiceInfoBleak (duplicate filter).
+BLUEZ_RSSI_POLL_SECONDS = 2.0
 SCAN_TIMEOUT_SECONDS = 60
 UPDATE_INTERVAL = 10
+
+
+def normalize_ble_address(address: str) -> str:
+    """Return the BLE address in the form HA's callback matcher indexes."""
+    return address.upper()

@@ -162,4 +162,4 @@ def test_advertising_is_diagnostic() -> None:
     assert ADVERTISING_DESCRIPTION.key == "advertising"
     assert ADVERTISING_DESCRIPTION.entity_category == "diagnostic"
     sensor = _sensor(advertising=False)
-    assert sensor._attr_unique_id == "AA:BB:CC:DD:EE:FF_1_advertising"
+    assert sensor._attr_unique_id == "aa:bb:cc:dd:ee:ff_1_advertising"

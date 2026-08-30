@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from bleak.backends.device import BLEDevice
 
@@ -23,14 +24,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CoreState, HomeAssistant, callback
 
 from .advertisement import advertisement_is_live, advertisement_monotonic_time
+from .bluez_pair import async_watch_device_rssi, is_bluez_pairing_supported
 from .client import dump_latest
 from .const import (
     AD_SILENCE_NEW_WINDOW_SECONDS,
+    BLUEZ_RSSI_POLL_SECONDS,
     CUFF_ADVERTISE_SECONDS,
     DOMAIN,
     PHONE_GRACE_SECONDS,
     POLL_WINDOW_GAP_SECONDS,
     UPDATE_INTERVAL,
+    normalize_ble_address,
 )
 from .parser import (
     BloodPressureMeasurement,
@@ -57,6 +61,15 @@ def _advertisement_address(service_info: object) -> str:
     if address:
         return str(address)
     return "unknown"
+
+
+def _live_sighting(address: str, now: float) -> object:
+    """Build a poll_needed argument whose scanner stamp is *now* (age 0)."""
+    return SimpleNamespace(
+        time=now,
+        address=address,
+        device=SimpleNamespace(address=address),
+    )
 
 
 def _address_lock(address: str) -> asyncio.Lock:
@@ -415,6 +428,7 @@ class VerovalBleCoordinator(
         self.device_data = device_data
         self.rssi: int | None = None
         self._advertising_timer: object | None = None
+        address = normalize_ble_address(address)
         super().__init__(
             hass,
             _LOGGER,
@@ -552,6 +566,69 @@ class VerovalBleCoordinator(
         """Push a listener update after advertisements have gone stale."""
         self._advertising_timer = None
         self.async_update_listeners()
+
+    def async_start_bluez_rssi_watch(self) -> Callable[[], None]:
+        """Watch BlueZ Device1 RSSI so a User-button flash is live without HA ads."""
+        if not is_bluez_pairing_supported():
+            return lambda: None
+        create_task = getattr(self.hass, "async_create_task", None)
+        if create_task is None:
+            return lambda: None
+        task = create_task(
+            async_watch_device_rssi(
+                self.address,
+                self.async_handle_bluez_rssi,
+                BLUEZ_RSSI_POLL_SECONDS,
+            )
+        )
+
+        def _stop() -> None:
+            task.cancel()
+
+        return _stop
+
+    @callback
+    def async_handle_bluez_rssi(self, rssi: int) -> None:
+        """Treat a Device1 RSSI update as a live advertisement."""
+        if self.hass.state is not CoreState.running:
+            return
+        self.rssi = rssi
+        now = self.device_data._monotonic()
+        if not self.device_data.is_advertising(now):
+            _LOGGER.debug(
+                "BlueZ Device1 RSSI %s for %s (HA scanner had no live ad)",
+                rssi,
+                self.address,
+            )
+        sighting = _live_sighting(self.address, now)
+        last_poll = getattr(self, "_last_poll", None)
+        needed = self.device_data.poll_needed(sighting, last_poll, self.cuff_user)
+        self._ensure_grace_timer()
+        if needed:
+            create_task = getattr(self.hass, "async_create_task", None)
+            if create_task is not None:
+                create_task(self._async_poll_connectable())
+        if self.device_data.is_advertising():
+            self._schedule_advertising_timer()
+        self.async_update_listeners()
+
+    async def _async_poll_connectable(self) -> None:
+        """Drain the dump when a live sighting says a GATT poll is due."""
+        if self.hass.state is not CoreState.running:
+            return
+        connectable_device = async_ble_device_from_address(
+            self.hass, self.address, connectable=True
+        )
+        if connectable_device is None:
+            _LOGGER.debug(
+                "Live sighting; no connectable BLEDevice for %s",
+                self.address,
+            )
+            return
+        measurement = await self.device_data.async_poll(
+            connectable_device, self.cuff_user
+        )
+        self._publish_shared_slots(measurement)
 
     def _async_needs_poll(
         self,

@@ -29,6 +29,7 @@ format_pairing_error = _bluez_pair.format_pairing_error
 PairingFailedError = _bluez_pair.PairingFailedError
 is_local_bluez_device = _bluez_pair.is_local_bluez_device
 bluez_path_from_device = _bluez_pair.bluez_path_from_device
+rssi_from_device_props = _bluez_pair.rssi_from_device_props
 
 
 class _FakeDBusError(Exception):
@@ -84,6 +85,21 @@ def test_format_device_snapshot_unwraps_variants() -> None:
     assert "Connected=True" in snapshot
     assert "RSSI=-67" in snapshot
     assert "UUIDs" not in snapshot
+
+
+def test_rssi_from_device_props_missing_while_asleep() -> None:
+    assert rssi_from_device_props({}) is None
+    assert rssi_from_device_props({"Name": "BPU26"}) is None
+
+
+def test_rssi_from_device_props_unwraps_variant() -> None:
+    class _Variant:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+    assert rssi_from_device_props({"RSSI": _Variant(-54)}) == -54
+    assert rssi_from_device_props({"RSSI": -65}) == -65
+    assert rssi_from_device_props({"RSSI": True}) is None
 
 
 def test_provide_passkey_second_call_does_not_raise() -> None:
