@@ -111,19 +111,19 @@ When the cuff is advertising but Home Assistant did not connect, grab the measur
 5. Turn on **See response** if you want the systolic / diastolic / pulse / timestamp in the result.
 6. **Perform action**.
 
-This ignores the advertise-window skip **and the 60-second phone-first grace** and starts a GATT dump now. If the cuff is not advertising, the action fails with *No connectable BPU26*. Look for `Force dump` / `Starting new advertise window (force dump)` in the log.
+This ignores the advertise-window skip **and the 20-second phone-first grace** and starts a GATT dump now. If the cuff is not advertising, the action fails with *No connectable BPU26*. Look for `Force dump` / `Starting new advertise window (force dump)` in the log.
 
 ## Capture a measurement session
 
 1. Enable debug as above.
 2. Press **User 1** or **User 2** on the cuff so it advertises (~2 minutes).
-3. Home Assistant waits **60 seconds** for medi.connect, then connects and drains the dump (or skips if the cuff disappeared). Run **Force data sync** to connect immediately.
+3. Home Assistant waits **20 seconds** for medi.connect, then connects and drains the dump (or skips if the cuff disappeared). Run **Force data sync** to connect immediately.
 4. **Settings → System → Logs** → download the log.
 5. Disable debug logging.
 
 Typical coordinator lines:
 
-- `DEBUG` `Waiting 60s for phone app before polling aa:bb:…`
+- `DEBUG` `Waiting 20s for phone app before polling aa:bb:…`
 - `DEBUG` `Phone grace elapsed; polling aa:bb:…` / `(no further ads)`
 - `DEBUG` `Cuff disappeared during phone grace; skipping dump for aa:bb:…`
 - `DEBUG` `Starting new advertise window (advertisement silence)` / `(idle unavailable)`

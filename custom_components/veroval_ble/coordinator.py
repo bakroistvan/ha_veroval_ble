@@ -172,7 +172,7 @@ class VerovalBleDeviceData:
         self._window_skipped = False
 
     def _grace_in_progress(self) -> bool:
-        """True while waiting for the phone, including after the 60s elapsed."""
+        """True while waiting for the phone, including after grace elapsed."""
         return (
             self._grace_started_at is not None
             and not self._window_skipped
@@ -186,7 +186,7 @@ class VerovalBleDeviceData:
         last_poll: float | None,
         now: float,
     ) -> bool:
-        """Start or continue the 60s phone-first wait; True when a dump may start."""
+        """Start or continue the phone-first wait; True when a dump may start."""
         address = _advertisement_address(service_info)
         if self._grace_started_at is None:
             self._grace_started_at = now
@@ -280,7 +280,7 @@ class VerovalBleDeviceData:
         if self._window_skipped:
             return False
 
-        # Scanner gaps during the 60s wait must not look like a new window.
+        # Scanner gaps during phone grace must not look like a new window.
         if self._grace_in_progress():
             self._last_ad_time = now
             return self._phone_grace_allows_poll(service_info, last_poll, now)
@@ -496,7 +496,7 @@ class VerovalBleCoordinator(
         return self.device_data.is_connected
 
     def _ensure_grace_timer(self) -> None:
-        """Dump after 60s even if Home Assistant sends no further advertisements."""
+        """Dump after phone grace even if Home Assistant sends no further advertisements."""
         data = self.device_data
         if not data._grace_in_progress() or data._grace_started_at is None:
             return

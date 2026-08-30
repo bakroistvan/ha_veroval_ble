@@ -1,15 +1,15 @@
 # Plan: phone-first grace before Home Assistant dumps the cuff
 
-Status: **implemented** (merged onto `dev` with PR #25 second-window + `force_dump`; every new GATT window waits 60s, cache consume and force_dump do not).
+Status: **implemented** (merged onto `dev` with PR #25 second-window + `force_dump`; every new GATT window waits 20s, cache consume and force_dump do not).
 
-After a measurement (or a User 1 / User 2 press), the BPU26 advertises for about two minutes. Today Home Assistant connects on the first advertisement and drains the `0x2A35` dump immediately. That wins the radio before **medi.connect** can. This plan adds a one-minute wait so the phone can take the transfer; if the cuff disappears during that wait, Home Assistant skips the dump.
+After a measurement (or a User 1 / User 2 press), the BPU26 advertises for about two minutes. Today Home Assistant connects on the first advertisement and drains the `0x2A35` dump immediately. That wins the radio before **medi.connect** can. This plan adds a 20-second wait so the phone can take the transfer; if the cuff disappears during that wait, Home Assistant skips the dump.
 
 ## Goal
 
-1. First advertisement of a new window starts a **60-second phone grace**.
+1. First advertisement of a new window starts a **20-second phone grace**.
 2. During grace, Home Assistant must **not** connect or drain GATT.
 3. If the cuff **stops advertising** during grace, treat that as “the phone grabbed it” and **skip** this window.
-4. If the cuff is **still advertising** after 60 seconds, run the existing dump (one connect, shared across User 1 and User 2).
+4. If the cuff is **still advertising** after 20 seconds, run the existing dump (one connect, shared across User 1 and User 2).
 
 ```text
 User 1 / User 2  →  cuff advertises (~2 min)
@@ -18,7 +18,7 @@ User 1 / User 2  →  cuff advertises (~2 min)
               first BPU26 advertisement
                          │
                          ▼
-              phone grace (60 s)  ── ads stop ──► skip dump
+              phone grace (20 s)  ── ads stop ──► skip dump
                          │
                     still advertising
                          │
@@ -30,12 +30,12 @@ User 1 / User 2  →  cuff advertises (~2 min)
 
 Polling already lives in `VerovalBleDeviceData` (`coordinator.py`):
 
-- Home Assistant’s `ActiveBluetoothDataUpdateCoordinator` calls `needs_poll` on **every** advertisement. Returning `False` for 60 seconds is enough; the cuff keeps advertising, so a later packet can start the dump.
+- Home Assistant’s `ActiveBluetoothDataUpdateCoordinator` calls `needs_poll` on **every** advertisement. Returning `False` for 20 seconds is enough; the cuff keeps advertising, so a later packet can start the dump.
 - User 1 and User 2 already share one `VerovalBleDeviceData` per MAC (`__init__.py`). The grace timer must be **per cuff**, not per slot.
 - Connecting **stops** advertisements. `_async_handle_unavailable` already exists. Today `mark_window_ended` **ignores** unavailable while `_poll_lock` is held, so Home Assistant’s own dump does not look like “window ended.”
 - After a dump, `_polled_this_window` plus `POLL_WINDOW_GAP_SECONDS` (180 s, longer than the ~2 min advertise period) blocks a second connect in the same window.
 
-Do **not** implement the wait as `asyncio.sleep(60)` inside `async_poll`. That would hold `_poll_lock`, so a phone grab would be ignored and Home Assistant would still connect afterward.
+Do **not** implement the wait as `asyncio.sleep(PHONE_GRACE_SECONDS)` inside `async_poll`. That would hold `_poll_lock`, so a phone grab would be ignored and Home Assistant would still connect afterward.
 
 ## Bonding (read this before implementing)
 
@@ -43,8 +43,8 @@ The cuff still bonds to **one** client. Waiting does not create dual pairing.
 
 | Who is bonded | What the grace actually does |
 |---------------|------------------------------|
-| Home Assistant only | Delay HA by 60 s. The phone cannot complete a transfer unless the user re-pairs it. |
-| Phone only | If medi.connect connects, ads stop → HA skips (avoids a failed/auth connect). If the phone is not opened, HA may try after 60 s and fail auth. |
+| Home Assistant only | Delay HA by 20 s. The phone cannot complete a transfer unless the user re-pairs it. |
+| Phone only | If medi.connect connects, ads stop → HA skips (avoids a failed/auth connect). If the phone is not opened, HA may try after 20 s and fail auth. |
 | User opens the phone while HA is waiting | Ads stop → skip. That is the success path this feature is for. |
 
 Keep the existing setup copy: unpair medi.connect **for pairing**. After pairing, this feature is a courtesy delay plus skip-on-disappear, not multi-bond support.
@@ -54,7 +54,7 @@ Keep the existing setup copy: unpair medi.connect **for pairing**. After pairing
 ### Constants (`const.py`)
 
 ```python
-PHONE_GRACE_SECONDS = 60
+PHONE_GRACE_SECONDS = 20
 ```
 
 No options flow in the first change. Zero would mean “current behavior”; add that later if someone wants it off.
@@ -100,11 +100,11 @@ After a skip, later advertisements in the same ~2 min window (phone disconnected
 
 ## False “unavailable” (scan gaps)
 
-Home Assistant marks a BLE device unavailable after advertisements go stale (often on the order of tens of seconds; depends on Core / `habluetooth`). A short passive-scan miss during the 60 s wait could look like a phone grab and skip a good window.
+Home Assistant marks a BLE device unavailable after advertisements go stale (often on the order of tens of seconds; depends on Core / `habluetooth`). A short passive-scan miss during the 20 s wait could look like a phone grab and skip a good window.
 
 First implementation: skip on the existing unavailable callback. It is the same signal the coordinator already uses for “cuff gone.”
 
-If hardware tests show false skips, add a short confirm (for example 10 s): on unavailable during grace, wait; if ads return, continue the **same** grace timer; if they stay gone, skip. Do not reset the 60 s clock on a gap, or a flaky scan would starve the dump.
+If hardware tests show false skips, add a short confirm (for example 10 s): on unavailable during grace, wait; if ads return, continue the **same** grace timer; if they stay gone, skip. Do not reset the 20 s clock on a gap, or a flaky scan would starve the dump.
 
 You cannot both (a) recover from every short gap and (b) skip when the phone connects and the cuff later advertises again. The confirm delay is the compromise.
 
@@ -115,8 +115,8 @@ Keep the no-Home-Assistant loader style.
 | Case | Expect |
 |------|--------|
 | First `poll_needed` of a window | Starts grace, returns `False`, does not call `dump_latest` |
-| 59 s later | Still `False` |
-| 60 s later, still “available” | `True` |
+| 19 s later | Still `False` |
+| 20 s later, still “available” | `True` |
 | Unavailable during grace | `_window_skipped`, later `poll_needed` is `False` |
 | Ads resume after skip, before 180 s | Still `False` (same window) |
 | After skip + `POLL_WINDOW_GAP_SECONDS` | New grace starts (`False` again, not an immediate dump) |
@@ -124,11 +124,11 @@ Keep the no-Home-Assistant loader style.
 | Two slots, one `VerovalBleDeviceData` | One `_grace_started_at`; after dump, second slot consumes cache |
 | After a real dump | No second grace until the 180 s gap |
 
-Add a dump-share case: grace is shared; User 2 does not start a second 60 s wait after User 1’s grace elapsed and the dump ran.
+Add a dump-share case: grace is shared; User 2 does not start a second 20 s wait after User 1’s grace elapsed and the dump ran.
 
 ## Docs and logging
 
-- README: after setup, Home Assistant waits one minute so medi.connect can sync first; if the Bluetooth symbol goes out, HA skips.
+- README: after setup, Home Assistant waits 20 seconds so medi.connect can sync first; if the Bluetooth symbol goes out, HA skips.
 - `docs/DEBUG.md`: example lines for grace start, skip, and grace elapsed.
 - Setup strings can stay “unpair medi.connect” (pairing still needs a single bond).
 
@@ -140,10 +140,10 @@ Log at **DEBUG** (do not INFO-spam advertisements):
 
 ## Manual check (real cuff)
 
-1. Pair HA as today. Press User 1. Confirm logs show grace, then a dump after ~60 s, sensors update.
-2. Press User 1, open medi.connect within 60 s. Ads should stop; HA must **not** connect; sensors stay on the last HA reading.
+1. Pair HA as today. Press User 1. Confirm logs show grace, then a dump after ~20 s, sensors update.
+2. Press User 1, open medi.connect within 20 s. Ads should stop; HA must **not** connect; sensors stay on the last HA reading.
 3. Two slots configured: one dump after grace, both slots publish from the shared records.
-4. Leave the cuff flashing with no phone: dump still happens before the ~2 min advertise window ends (60 s wait + connect + drain still fits).
+4. Leave the cuff flashing with no phone: dump still happens before the ~2 min advertise window ends (20 s wait + connect + drain still fits).
 
 HIL (`scripts/hil_dump.py`) stays immediate; this delay is coordinator-only.
 
