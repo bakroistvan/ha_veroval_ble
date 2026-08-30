@@ -130,6 +130,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 
 
 _const, _parser, _coordinator = _load_coordinator()
+PHONE_GRACE_SECONDS = _const.PHONE_GRACE_SECONDS
 POLL_WINDOW_GAP_SECONDS = _const.POLL_WINDOW_GAP_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
 VerovalBleCoordinator = _coordinator.VerovalBleCoordinator
@@ -224,7 +225,8 @@ def test_unavailable_while_idle_clears_flag() -> None:
 
     assert data._polled_this_window is False
     assert data._window_polled_at is None
-    assert data.poll_needed(object(), None) is True
+    assert data.poll_needed(object(), None) is False
+    assert data._grace_started_at == 10.0
 
 
 def test_poll_needed_true_again_after_window_gap() -> None:
@@ -238,6 +240,94 @@ def test_poll_needed_true_again_after_window_gap() -> None:
     assert data._polled_this_window is True
 
     clock.now = POLL_WINDOW_GAP_SECONDS
-    assert data.poll_needed(object(), None) is True
+    assert data.poll_needed(object(), None) is False
     assert data._polled_this_window is False
     assert data._window_polled_at is None
+    assert data._grace_started_at == POLL_WINDOW_GAP_SECONDS
+
+    clock.now = POLL_WINDOW_GAP_SECONDS + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
+
+
+def test_first_poll_needed_starts_phone_grace() -> None:
+    clock = _FakeClock(100.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    dumps = {"n": 0}
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        dumps["n"] += 1
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+
+    assert data.poll_needed(object(), None) is False
+    assert data._grace_started_at == 100.0
+    clock.now = 100.0 + PHONE_GRACE_SECONDS - 1
+    assert data.poll_needed(object(), None) is False
+    clock.now = 100.0 + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
+    assert dumps["n"] == 0
+
+
+def test_unavailable_during_grace_skips_until_window_gap() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    coordinator = _make_coordinator(data)
+
+    assert data.poll_needed(object(), None) is False
+    clock.now = 30.0
+    coordinator._async_handle_unavailable(object())
+
+    assert data._window_skipped is True
+    assert data._grace_started_at is None
+    assert data._window_polled_at == 30.0
+    clock.now = 50.0
+    assert data.poll_needed(object(), None) is False
+
+    clock.now = 30.0 + POLL_WINDOW_GAP_SECONDS
+    assert data.poll_needed(object(), None) is False
+    assert data._window_skipped is False
+    assert data._grace_started_at == 30.0 + POLL_WINDOW_GAP_SECONDS
+
+    clock.now = 30.0 + POLL_WINDOW_GAP_SECONDS + PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
+
+
+def test_second_unavailable_after_skip_keeps_gap() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(object(), None) is False
+    clock.now = 10.0
+    data.mark_window_ended("AA:BB:CC:DD:EE:FF")
+    data.mark_window_ended("AA:BB:CC:DD:EE:FF")
+    assert data._window_skipped is True
+    assert data._window_polled_at == 10.0
+
+
+def test_unavailable_after_grace_elapsed_skips_before_dump() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(object(), None) is False
+    clock.now = PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None) is True
+    data.mark_window_ended()
+    assert data._window_skipped is True
+    assert data.poll_needed(object(), None) is False
+
+
+def test_after_dump_no_new_grace_until_window_gap() -> None:
+    clock = _FakeClock(50.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+
+    clock.now = 80.0
+    assert data.poll_needed(object(), None) is False
+    assert data._polled_this_window is True
+    clock.now = 50.0 + POLL_WINDOW_GAP_SECONDS
+    assert data.poll_needed(object(), None) is False
+    assert data._grace_started_at == 50.0 + POLL_WINDOW_GAP_SECONDS

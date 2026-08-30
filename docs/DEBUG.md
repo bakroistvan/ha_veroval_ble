@@ -104,15 +104,21 @@ The 6-digit PIN is not written to the log.
 
 1. Enable debug as above.
 2. Press **User 1** or **User 2** on the cuff so it advertises (~2 minutes).
-3. Wait for Home Assistant to connect and drain the dump.
+3. Home Assistant waits **60 seconds** for medi.connect, then connects and drains the dump (or skips if the cuff disappeared).
 4. **Settings → System → Logs** → download the log.
 5. Disable debug logging.
+
+Typical coordinator lines:
+
+- `DEBUG` `Waiting 60s for phone app before polling aa:bb:…`
+- `DEBUG` `Phone grace elapsed; polling aa:bb:…`
+- `DEBUG` `Cuff disappeared during phone grace; skipping dump for aa:bb:…`
 
 ## What appears in the log
 
 | Level | What you see |
 |-------|----------------|
-| **DEBUG** | Advertisement seen; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); `stop_notify` and disconnect; config-flow steps; BlueZ Device1 snapshot; agent PIN request (not the PIN value); pairing stage tracebacks |
+| **DEBUG** | Advertisement seen; phone-first grace start / elapsed / skip; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); `stop_notify` and disconnect; config-flow steps; BlueZ Device1 snapshot; agent PIN request (not the PIN value); pairing stage tracebacks |
 | **INFO** | Config entry setup (address and User 1/2); successful latest reading for that slot (systolic / diastolic / pulse / time, no raw hex); `Pair()` started; pair+trust succeeded |
 | **WARNING** | Connect timeout, missing Blood Pressure Measurement characteristic, parse failure, pairing failures with the BlueZ error name and Device1 properties |
 | **ERROR** | Unexpected exceptions around a poll |

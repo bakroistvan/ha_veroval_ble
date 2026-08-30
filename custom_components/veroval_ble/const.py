@@ -16,5 +16,7 @@ DUMP_TIMEOUT_SECONDS = 30.0
 # Gap after a dump before advertisements may start another window.
 # Longer than the cuff advertise period; independent of DUMP_TIMEOUT_SECONDS.
 POLL_WINDOW_GAP_SECONDS = 180
+# Wait after the first advertisement so medi.connect can take the transfer.
+PHONE_GRACE_SECONDS = 60
 SCAN_TIMEOUT_SECONDS = 60
 UPDATE_INTERVAL = 10

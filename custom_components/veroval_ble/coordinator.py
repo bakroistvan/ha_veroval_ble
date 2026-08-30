@@ -23,7 +23,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CoreState, HomeAssistant, callback
 
 from .client import dump_latest
-from .const import POLL_WINDOW_GAP_SECONDS, UPDATE_INTERVAL
+from .const import PHONE_GRACE_SECONDS, POLL_WINDOW_GAP_SECONDS, UPDATE_INTERVAL
 from .parser import (
     BloodPressureMeasurement,
     cuff_user_to_ble_id,
@@ -33,6 +33,18 @@ from .parser import (
 _LOGGER = logging.getLogger(__name__)
 
 _ADDRESS_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _advertisement_address(service_info: object) -> str:
+    """Best-effort BLE address from an advertisement callback argument."""
+    device = getattr(service_info, "device", None)
+    address = getattr(device, "address", None)
+    if address:
+        return str(address)
+    address = getattr(service_info, "address", None)
+    if address:
+        return str(address)
+    return "unknown"
 
 
 def _address_lock(address: str) -> asyncio.Lock:
@@ -56,10 +68,40 @@ class VerovalBleDeviceData:
         self._window_polled_at: float | None = None
         self._window_records: list[BloodPressureMeasurement] | None = None
         self._consumed_slots: set[int] = set()
+        self._grace_started_at: float | None = None
+        self._grace_address: str | None = None
+        self._grace_elapsed_logged = False
+        self._window_skipped = False
+
+    def _expire_window_if_due(self) -> None:
+        """Clear dump and grace state after POLL_WINDOW_GAP_SECONDS."""
+        polled_at = self._window_polled_at
+        if (
+            polled_at is None
+            or self._monotonic() - polled_at < POLL_WINDOW_GAP_SECONDS
+        ):
+            return
+        self._polled_this_window = False
+        self._window_polled_at = None
+        self._window_records = None
+        self._consumed_slots.clear()
+        self._grace_started_at = None
+        self._grace_address = None
+        self._grace_elapsed_logged = False
+        self._window_skipped = False
+
+    def _grace_in_progress(self) -> bool:
+        """True while waiting for the phone, including after the 60s elapsed."""
+        return (
+            self._grace_started_at is not None
+            and not self._window_skipped
+            and self._window_records is None
+            and not self._polled_this_window
+        )
 
     def poll_needed(
         self,
-        service_info: BluetoothServiceInfoBleak,  # noqa: ARG002
+        service_info: BluetoothServiceInfoBleak,
         last_poll: float | None,
         cuff_user: int | None = None,
     ) -> bool:
@@ -68,16 +110,12 @@ class VerovalBleDeviceData:
         Two-arg calls stay GATT-window-only (a dump in this window suppresses
         another connect). Pass *cuff_user* so the other slot can consume the
         shared dump without a second connection.
+
+        The first advertisement of a window starts a phone-first grace
+        (``PHONE_GRACE_SECONDS``). Later advertisements of the same window
+        share that timer.
         """
-        polled_at = self._window_polled_at
-        if (
-            polled_at is not None
-            and self._monotonic() - polled_at >= POLL_WINDOW_GAP_SECONDS
-        ):
-            self._polled_this_window = False
-            self._window_polled_at = None
-            self._window_records = None
-            self._consumed_slots.clear()
+        self._expire_window_if_due()
 
         if self._poll_lock.locked():
             return False
@@ -92,19 +130,53 @@ class VerovalBleDeviceData:
 
         if self._polled_this_window:
             return False
+
+        if self._window_skipped:
+            return False
+
+        address = _advertisement_address(service_info)
+        now = self._monotonic()
+        if self._grace_started_at is None:
+            self._grace_started_at = now
+            self._grace_address = address if address != "unknown" else None
+            _LOGGER.debug(
+                "Waiting %ss for phone app before polling %s",
+                PHONE_GRACE_SECONDS,
+                address,
+            )
+        if now - self._grace_started_at < PHONE_GRACE_SECONDS:
+            return False
+        if not self._grace_elapsed_logged:
+            _LOGGER.debug("Phone grace elapsed; polling %s", address)
+            self._grace_elapsed_logged = True
         return not last_poll or last_poll > UPDATE_INTERVAL
 
-    def mark_window_ended(self) -> None:
-        """Allow another dump after the cuff stops advertising.
+    def mark_window_ended(self, address: str | None = None) -> None:
+        """Handle the cuff stopping advertisements.
 
         Connecting stops advertisements, so Home Assistant may mark the cuff
         unavailable while a dump is still running. Ignore that signal.
+
+        If the phone-first grace is still open, treat disappearance as the
+        phone grabbing the transfer and skip this window.
 
         Keep ``_window_records`` / ``_consumed_slots`` so the other user slot
         can still consume this window's dump. The cache is cleared when a new
         GATT dump starts or when the poll-window gap expires.
         """
         if self._poll_lock.locked():
+            return
+        if self._window_skipped:
+            return
+        if self._grace_in_progress():
+            label = address or self._grace_address or "unknown"
+            self._window_skipped = True
+            self._window_polled_at = self._monotonic()
+            self._grace_started_at = None
+            _LOGGER.debug(
+                "Cuff disappeared during phone grace; skipping dump for %s",
+                label,
+            )
             return
         self._polled_this_window = False
         if self._window_records is None:
@@ -184,6 +256,7 @@ class VerovalBleCoordinator(
         device_data: VerovalBleDeviceData,
     ) -> None:
         """Initialize the coordinator for one address + cuff user slot."""
+        self.address = address
         self.cuff_user = cuff_user
         self.device_data = device_data
         self.rssi: int | None = None
@@ -246,8 +319,8 @@ class VerovalBleCoordinator(
     def _async_handle_unavailable(
         self, service_info: BluetoothServiceInfoBleak
     ) -> None:
-        """Reset dump-skip so the next advertise window can poll again."""
-        self.device_data.mark_window_ended()
+        """Skip an in-progress phone grace, or reset after a finished dump."""
+        self.device_data.mark_window_ended(self.address)
         super()._async_handle_unavailable(service_info)
 
     @callback
