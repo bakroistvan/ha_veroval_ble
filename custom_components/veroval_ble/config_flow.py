@@ -29,12 +29,15 @@ from .bluez_pair import (
     PairingFailedError,
     PairingNotSupportedError,
     ProxyNotSupportedError,
+    async_start_host_adapter_discovery,
     bluez_path_from_device,
     format_pairing_error,
     is_bluez_pairing_supported,
     is_local_bluez_device,
 )
+from .advertisement import advertisement_is_live
 from .const import (
+    ADVERTISEMENT_MAX_AGE_SECONDS,
     CONF_CUFF_USER,
     CONF_PIN,
     DOMAIN,
@@ -46,10 +49,6 @@ from .parser import CUFF_USER_1, CUFF_USER_2
 
 _LOGGER = logging.getLogger(__name__)
 
-# HA's scanner cache can outlive BlueZ Device1 objects for unpaired devices.
-ADVERTISEMENT_MAX_AGE_SECONDS = 30.0
-
-
 def _is_bpu26(service_info: BluetoothServiceInfoBleak) -> bool:
     """Return True if this advertisement looks like a Veroval BPU26."""
     name = service_info.name or ""
@@ -60,16 +59,53 @@ def _is_bpu26(service_info: BluetoothServiceInfoBleak) -> bool:
 
 def _is_fresh_advertisement(service_info: BluetoothServiceInfoBleak) -> bool:
     """Return True if this advertisement is recent enough that BlueZ may still know it."""
-    ad_time = getattr(service_info, "time", None)
-    if not isinstance(ad_time, (int, float)):
+    return advertisement_is_live(
+        service_info,
+        max_age=ADVERTISEMENT_MAX_AGE_SECONDS,
+        require_timestamp=True,
+    )
+
+
+def _source_is_local_adapter(source: object) -> bool:
+    """Return True if ``service_info.source`` looks like a local adapter MAC.
+
+    Home Assistant uses the host adapter address as ``source``. ESPHome and
+    other Bluetooth-proxy scanner names are never treated as the host radio.
+    """
+    if not isinstance(source, str):
         return False
-    age = time.monotonic() - ad_time
-    return 0 <= age <= ADVERTISEMENT_MAX_AGE_SECONDS
+    lowered = source.strip().lower()
+    if not lowered:
+        return False
+    if any(token in lowered for token in ("esphome", "proxy", "remote", "shelly")):
+        return False
+    return _normalize_address(lowered) is not None
 
 
 def _is_host_adapter_advertisement(service_info: BluetoothServiceInfoBleak) -> bool:
-    """Return True if the advertisement was seen on the local BlueZ adapter."""
-    return is_local_bluez_device(service_info.device)
+    """Return True if the advertisement was seen on the local BlueZ adapter.
+
+    Primary check: Bleak/HA ``device.details`` contains a ``/org/bluez/`` path.
+    Fallback when that path is missing: a MAC-shaped ``service_info.source``
+    (HA's local-adapter scanner id). Proxy scanner names are never host.
+    ``async_scanner_devices_by_address`` is not used (not imported here).
+    """
+    device = getattr(service_info, "device", None)
+    if device is not None and is_local_bluez_device(device):
+        return True
+    return _source_is_local_adapter(getattr(service_info, "source", None))
+
+
+def _is_proxy_advertisement(service_info: BluetoothServiceInfoBleak) -> bool:
+    """Return True if this advertisement is known to be from a non-host scanner."""
+    if _is_host_adapter_advertisement(service_info):
+        return False
+    source = getattr(service_info, "source", None)
+    if isinstance(source, str) and source.strip() and not _source_is_local_adapter(source):
+        return True
+    device = getattr(service_info, "device", None)
+    details = getattr(device, "details", None) if device is not None else None
+    return isinstance(details, dict) and bool(details)
 
 
 def _normalize_address(value: str) -> str | None:
@@ -104,6 +140,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         """Initialize the config flow."""
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
+        self._proxy_devices: dict[str, BluetoothServiceInfoBleak] = {}
         self._address: str | None = None
         self._name: str | None = None
         self._scan_task: asyncio.Task[None] | None = None
@@ -210,6 +247,12 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         if not _is_bpu26(discovery_info):
             return self.async_abort(reason="not_supported")
+        if not _is_fresh_advertisement(discovery_info):
+            _LOGGER.debug(
+                "Ignoring stale Bluetooth discovery for %s",
+                discovery_info.address,
+            )
+            return self.async_abort(reason="stale_advertisement")
 
         address = discovery_info.address.lower()
         configured = self._configured_slots(address)
@@ -251,10 +294,29 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             ):
                 self._discovery_info = current
                 return await self.async_step_pairing()
-            _LOGGER.debug(
-                "Discovery for %s is stale or not from the host adapter; scanning",
-                self._address,
-            )
+
+            if self._discovered_devices.get(self._address) is None:
+                candidate = current or self._discovery_info
+                if self._discovery_is_proxy_only(candidate):
+                    _LOGGER.debug(
+                        "Discovery for %s is proxy-only; pairing needs the host adapter",
+                        self._address,
+                    )
+                    return self.async_abort(reason="proxy_not_supported")
+                if (
+                    candidate is not None
+                    and _is_host_adapter_advertisement(candidate)
+                    and not _is_fresh_advertisement(candidate)
+                ):
+                    _LOGGER.debug(
+                        "Discovery for %s is a stale host advertisement; scanning",
+                        self._address,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "No fresh host advertisement for %s; scanning",
+                        self._address,
+                    )
             return await self.async_step_scan()
 
         self._set_confirm_only()
@@ -267,21 +329,36 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders=placeholders,
         )
 
+    def _discovery_is_proxy_only(
+        self, candidate: BluetoothServiceInfoBleak | None
+    ) -> bool:
+        """Return True if this address is known only via a Bluetooth proxy."""
+        if self._address is None:
+            return False
+        if self._address in self._discovered_devices:
+            return False
+        if candidate is not None and _is_proxy_advertisement(candidate):
+            return True
+        return self._address in self._proxy_devices
+
     def _collect_discovered(self) -> None:
-        """Cache fresh BPU26 advertisements from the host adapter only."""
+        """Cache fresh host BPU26 ads; record proxy-only ads separately."""
         for discovery_info in async_discovered_service_info(self.hass, False):
             if not _is_bpu26(discovery_info):
                 continue
+            address = discovery_info.address.lower()
+            if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+                continue
             if not _is_host_adapter_advertisement(discovery_info):
+                if _is_proxy_advertisement(discovery_info) and address not in self._discovered_devices:
+                    self._proxy_devices[address] = discovery_info
                 continue
             if not _is_fresh_advertisement(discovery_info):
                 continue
-            address = discovery_info.address.lower()
             if address in self._discovered_devices:
                 continue
-            if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
-                continue
             self._discovered_devices[address] = discovery_info
+            self._proxy_devices.pop(address, None)
 
     def _discovered_titles(self) -> dict[str, str]:
         """Return address → label for cuffs that still have a free user slot."""
@@ -308,6 +385,20 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
             return self.async_abort(reason="already_configured")
         discovery = self._discovered_devices.get(address)
+        if discovery is None:
+            if address in self._proxy_devices:
+                _LOGGER.debug(
+                    "Address %s was only seen via a Bluetooth proxy", address
+                )
+                return self.async_abort(reason="proxy_not_supported")
+            existing = self._discovery_info
+            if existing is not None and str(existing.address).lower() == address:
+                if _is_proxy_advertisement(existing):
+                    _LOGGER.debug(
+                        "Address %s was only seen via a Bluetooth proxy", address
+                    )
+                    return self.async_abort(reason="proxy_not_supported")
+                discovery = existing
         self._discovery_info = discovery
         self._address = address
         self._name = (discovery.name if discovery else None) or LOCAL_NAME
@@ -322,7 +413,13 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         if not titles:
             if self._discovered_devices:
                 return self.async_abort(reason="already_configured")
-            _LOGGER.debug("Scan timed out with no BPU26 advertisements")
+            if self._proxy_devices:
+                _LOGGER.debug(
+                    "Scan saw BPU26 only via a Bluetooth proxy: %s",
+                    ", ".join(sorted(self._proxy_devices)),
+                )
+                return self.async_abort(reason="proxy_not_supported")
+            _LOGGER.debug("Scan timed out with no BPU26 advertisements on the host adapter")
             return await self.async_step_not_found()
         if len(titles) == 1:
             return await self._async_choose_address(next(iter(titles)))
@@ -339,14 +436,18 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             if not _is_bpu26(service_info):
                 return
             if not _is_host_adapter_advertisement(service_info):
-                _LOGGER.debug(
-                    "Ignoring non-host advertisement for %s", service_info.address
-                )
+                if _is_proxy_advertisement(service_info):
+                    _LOGGER.debug(
+                        "Ignoring non-host advertisement for %s (Bluetooth proxy)",
+                        service_info.address,
+                    )
+                    self._proxy_devices[service_info.address.lower()] = service_info
                 return
             address = service_info.address.lower()
             if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
                 return
             self._discovered_devices[address] = service_info
+            self._proxy_devices.pop(address, None)
             found.set()
 
         unsubscribers = [
@@ -363,12 +464,15 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
                 BluetoothScanningMode.ACTIVE,
             ),
         ]
+        stop_discovery = None
         try:
             self._discovered_devices.clear()
+            self._proxy_devices.clear()
             self._collect_discovered()
             if self._discovered_devices:
                 self.async_update_progress(1.0)
                 return
+            stop_discovery = await async_start_host_adapter_discovery()
             started = time.monotonic()
             while True:
                 elapsed = time.monotonic() - started
@@ -384,6 +488,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             self._collect_discovered()
         finally:
             self.async_update_progress(1.0)
+            if stop_discovery is not None:
+                await stop_discovery()
             for unsub in unsubscribers:
                 unsub()
 
@@ -515,7 +621,9 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         except DeviceNotFoundError:
             await self._async_close_pair_session()
             _LOGGER.debug(
-                "BlueZ has no device object for %s; returning to scan", self._address
+                "BlueZ has no Device1 on the host adapter for %s; "
+                "returning to not_found (Discovered MAC is not a host address)",
+                self._address,
             )
             self._not_found_error = "device_not_found"
             return await self.async_step_not_found()

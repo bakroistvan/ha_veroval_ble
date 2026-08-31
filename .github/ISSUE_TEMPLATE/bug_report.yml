@@ -1,0 +1,72 @@
+name: Bug report
+description: Something is broken in pairing, sync, or the published sensors.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Pairing and BLE dumps are host-adapter only — please say so if you used a Bluetooth proxy.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got.
+    validations:
+      required: true
+
+  - type: input
+    id: ha-version
+    attributes:
+      label: Home Assistant version
+      placeholder: "2025.8.0"
+    validations:
+      required: true
+
+  - type: input
+    id: integration-version
+    attributes:
+      label: Integration version
+      description: HACS download version or `custom_components/veroval_ble/manifest.json` → `version`.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install
+      options:
+        - HACS (custom repository)
+        - Manual copy of custom_components
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: adapter
+    attributes:
+      label: Bluetooth path
+      options:
+        - Home Assistant host adapter (built-in or USB)
+        - ESPHome Bluetooth Proxy (not supported for pairing)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Settings → Devices & services → Veroval Blood Pressure BLE → ⋮ → Enable debug logging, reproduce, then paste `veroval_ble` lines. Redact the 6-digit PIN.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context
+      description: medi.connect still bonded, advertise window expired, two user slots, etc.

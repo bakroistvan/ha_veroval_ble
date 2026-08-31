@@ -21,6 +21,11 @@ AGENT_PATH = "/org/homeassistant/veroval_ble/agent"
 AGENT_CAPABILITY = "KeyboardDisplay"
 
 PAIR_TIMEOUT_SECONDS = 120.0
+# HA can see a BPU26 advertisement before BlueZ exports Device1. Retry long
+# enough that a host scan (or Adapter1.StartDiscovery) can create the object.
+DEVICE_RESOLVE_ATTEMPTS = 16
+DEVICE_RESOLVE_INTERVAL_SECONDS = 0.5
+DISCOVERY_CONNECT_TIMEOUT_SECONDS = 1.5
 
 
 class PairingError(Exception):
@@ -198,29 +203,73 @@ def is_bluez_pairing_supported() -> bool:
     return True
 
 
+# Keys that hold Device1 properties / advertisement data, not an object path.
+_DETAILS_NON_PATH_KEYS = frozenset({"props", "properties", "advertisement"})
+
+
+def _bluez_path_from_details(details: Any) -> str | None:
+    """Extract a BlueZ object path from Bleak/HA device details, if present.
+
+    Typical BlueZ bleak shape is ``{"path": "/org/bluez/hci0/dev_…", "props":
+    {...}}``. ``props`` is Device1 properties and must not be treated as a
+    path. Nested ``{"details": {"path": ...}}`` is also accepted. This helper
+    does not consult HA scanner APIs (``async_scanner_devices_by_address`` is
+    not imported); host-vs-proxy when the path is missing is handled by
+    ``_is_host_adapter_advertisement`` via ``service_info.source``.
+    """
+    if isinstance(details, str) and details.startswith("/org/bluez/"):
+        return details
+    if not isinstance(details, dict):
+        return None
+    path = details.get("path")
+    if isinstance(path, str) and path.startswith("/org/bluez/"):
+        return path
+    for key, value in details.items():
+        if key in _DETAILS_NON_PATH_KEYS:
+            continue
+        if isinstance(value, str) and value.startswith("/org/bluez/"):
+            return value
+        if isinstance(value, dict):
+            nested = value.get("path")
+            if isinstance(nested, str) and nested.startswith("/org/bluez/"):
+                return nested
+    return None
+
+
 def is_local_bluez_device(device: Any) -> bool:
     """Return True if a Bleak BLEDevice looks like a local BlueZ object."""
-    details = getattr(device, "details", None) or {}
-    if not isinstance(details, dict):
-        return False
-    path = details.get("path")
-    return isinstance(path, str) and path.startswith("/org/bluez/")
+    return _bluez_path_from_details(getattr(device, "details", None)) is not None
 
 
 def bluez_path_from_device(device: Any) -> str | None:
     """Return the BlueZ object path from a Bleak BLEDevice, if present."""
-    if not is_local_bluez_device(device):
-        return None
-    details = device.details
-    assert isinstance(details, dict)
-    path = details.get("path")
-    assert isinstance(path, str)
-    return path
+    return _bluez_path_from_details(getattr(device, "details", None))
 
 
 def _adapter_path_for_device(device_path: str) -> str:
     """Return `/org/bluez/hciX` for a device path `/org/bluez/hciX/dev_…`."""
     return device_path.rsplit("/", 1)[0]
+
+
+def rssi_from_device_props(props: dict[str, Any]) -> int | None:
+    """Return Device1 RSSI if BlueZ is currently receiving advertisements.
+
+    RSSI is absent from Device1 while the cuff is asleep (cached Name /
+    ManufacturerData remain). Presence is a live radio sighting even when
+    Home Assistant's scanner does not emit BluetoothServiceInfoBleak.
+    RSSI is also usually absent while Connected is true (GATT link up).
+    """
+    if "RSSI" not in props:
+        return None
+    raw = _dbus_plain(props["RSSI"])
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return int(raw)
+
+
+def connected_from_device_props(props: dict[str, Any]) -> bool:
+    """Return Device1 Connected (host adapter GATT link), matching bluetoothctl."""
+    return _dbus_bool(props.get("Connected"))
 
 
 def _dbus_bool(value: Any, default: bool = False) -> bool:
@@ -238,6 +287,148 @@ async def _get_managed_objects(bus: Any) -> dict[str, Any]:
         BLUEZ_SERVICE, "/", introspection
     ).get_interface(OBJECT_MANAGER_INTERFACE)
     return await manager.call_get_managed_objects()
+
+
+async def async_start_host_adapter_discovery() -> Any:
+    """Start BlueZ Adapter1.StartDiscovery on host adapters (best effort).
+
+    Returns an async callable that stops discovery and disconnects. Never
+    raises: the HA advertisement scan still runs if BlueZ discovery fails.
+    Starting discovery during the scan / Device1-resolve window makes an
+    unpaired Device1 more likely to appear. ``InProgress`` is ignored because
+    Home Assistant may already be scanning.
+    """
+
+    async def _noop() -> None:
+        return None
+
+    if not is_bluez_pairing_supported():
+        return _noop
+
+    try:
+        from dbus_fast.aio import MessageBus
+        from dbus_fast.constants import BusType
+    except ImportError:
+        return _noop
+
+    bus = None
+    started: list[str] = []
+    try:
+        bus = await asyncio.wait_for(
+            MessageBus(bus_type=BusType.SYSTEM).connect(),
+            timeout=DISCOVERY_CONNECT_TIMEOUT_SECONDS,
+        )
+        objects = await _get_managed_objects(bus)
+        for path, interfaces in objects.items():
+            if ADAPTER_INTERFACE not in interfaces:
+                continue
+            try:
+                introspection = await bus.introspect(BLUEZ_SERVICE, path)
+                adapter = bus.get_proxy_object(
+                    BLUEZ_SERVICE, path, introspection
+                ).get_interface(ADAPTER_INTERFACE)
+                await adapter.call_start_discovery()
+                started.append(path)
+                _LOGGER.debug("Started BlueZ discovery on %s", path)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("StartDiscovery on %s failed: %s", path, err)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("BlueZ StartDiscovery unavailable: %s", err)
+        if bus is not None:
+            try:
+                bus.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+        return _noop
+
+    async def _stop() -> None:
+        try:
+            for path in started:
+                try:
+                    introspection = await bus.introspect(BLUEZ_SERVICE, path)
+                    adapter = bus.get_proxy_object(
+                        BLUEZ_SERVICE, path, introspection
+                    ).get_interface(ADAPTER_INTERFACE)
+                    await adapter.call_stop_discovery()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("StopDiscovery on %s failed: %s", path, err)
+        finally:
+            if bus is not None:
+                try:
+                    bus.disconnect()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("D-Bus disconnect after discovery failed: %s", err)
+
+    return _stop
+
+
+async def _radio_for_address(
+    bus: Any, address: str
+) -> tuple[int | None, bool] | None:
+    """Return (RSSI or None, Connected) for *address*, or None if no Device1."""
+    objects = await _get_managed_objects(bus)
+    target = address.lower()
+    for _path, interfaces in objects.items():
+        device = interfaces.get(DEVICE_INTERFACE)
+        if not device:
+            continue
+        address_variant = device.get("Address")
+        if address_variant is None:
+            continue
+        addr = getattr(address_variant, "value", address_variant)
+        if str(addr).lower() != target:
+            continue
+        return rssi_from_device_props(device), connected_from_device_props(device)
+    return None
+
+
+async def async_watch_device_rssi(
+    address: str,
+    on_rssi: Any,
+    interval: float,
+    on_connected: Any = None,
+) -> None:
+    """Call *on_rssi* / *on_connected* from BlueZ Device1 for *address*.
+
+    RSSI is present while the cuff is advertising and not connected.
+    Connected matches ``bluetoothctl info`` ``Connected: yes/no``.
+    Runs until cancelled. No-op when this host cannot talk to BlueZ.
+    """
+    if not is_bluez_pairing_supported():
+        return
+    try:
+        from dbus_fast.aio import MessageBus
+        from dbus_fast.constants import BusType
+    except ImportError:
+        return
+
+    while True:
+        bus = None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            while True:
+                radio = await _radio_for_address(bus, address)
+                if radio is None:
+                    if on_connected is not None:
+                        on_connected(False)
+                else:
+                    rssi, connected = radio
+                    if rssi is not None:
+                        on_rssi(rssi)
+                    if on_connected is not None:
+                        on_connected(connected)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("BlueZ radio watch for %s failed: %s", address, err)
+            await asyncio.sleep(interval)
+        finally:
+            if bus is not None:
+                try:
+                    bus.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 async def _find_device_path_on_bus(bus: Any, address: str) -> str | None:
@@ -720,8 +911,8 @@ class BlueZPairSession:
             resolved = await _find_device_path_on_bus(self._bus, self.address)
             if resolved is None:
                 raise DeviceNotFoundError(
-                    f"BlueZ has no device object for {self.address}. "
-                    "Press User 1 or User 2 so the cuff advertises, then scan again."
+                    f"BlueZ has no Device1 on the host adapter for {self.address}. "
+                    "A Home Assistant Discovered card is not a bluetoothctl address."
                 )
             self.device_path = resolved
             objects = await _get_managed_objects(self._bus)
@@ -729,31 +920,39 @@ class BlueZPairSession:
         return ifaces.get(DEVICE_INTERFACE) or {}
 
     async def _async_resolve_device_path(self) -> None:
-        """Resolve a live BlueZ Device1 path, retrying briefly for export races."""
+        """Resolve a live BlueZ Device1 path, retrying for export races.
+
+        Retries for about 8 seconds (16 × 0.5s) while BlueZ discovery is
+        running so an unpaired Device1 can appear after a host advertisement.
+        """
         last_error: DeviceNotFoundError | None = None
-        for attempt in range(8):
-            try:
-                if self.device_path is None:
-                    self.device_path = await self._find_device_path()
-                _LOGGER.debug(
-                    "Resolve Device1 %s attempt=%s path=%s",
-                    self.address,
-                    attempt + 1,
-                    self.device_path,
-                )
-                if self.device_path is None:
-                    raise DeviceNotFoundError(
-                        f"BlueZ has no device object for {self.address}. "
-                        "Press User 1 or User 2 so the cuff advertises, then scan again."
+        stop_discovery = await async_start_host_adapter_discovery()
+        try:
+            for attempt in range(DEVICE_RESOLVE_ATTEMPTS):
+                try:
+                    if self.device_path is None:
+                        self.device_path = await self._find_device_path()
+                    _LOGGER.debug(
+                        "Resolve Device1 %s attempt=%s path=%s",
+                        self.address,
+                        attempt + 1,
+                        self.device_path,
                     )
-                await self._device1_props()
-                return
-            except DeviceNotFoundError as err:
-                last_error = err
-                self.device_path = None
-                if attempt == 7:
-                    break
-                await asyncio.sleep(0.25)
+                    if self.device_path is None:
+                        raise DeviceNotFoundError(
+                            f"BlueZ has no Device1 on the host adapter for {self.address}. "
+                            "A Home Assistant Discovered card is not a bluetoothctl address."
+                        )
+                    await self._device1_props()
+                    return
+                except DeviceNotFoundError as err:
+                    last_error = err
+                    self.device_path = None
+                    if attempt == DEVICE_RESOLVE_ATTEMPTS - 1:
+                        break
+                    await asyncio.sleep(DEVICE_RESOLVE_INTERVAL_SECONDS)
+        finally:
+            await stop_discovery()
         assert last_error is not None
         _LOGGER.warning(
             "BlueZ has no Device1 object for %s after retries: %s",

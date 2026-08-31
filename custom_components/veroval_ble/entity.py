@@ -23,7 +23,7 @@ class VerovalBleEntity(CoordinatorEntity[VerovalBleCoordinator]):
         """Initialize the entity."""
         super().__init__(coordinator)
         self.entity_description = description
-        address = coordinator.address
+        address = coordinator.address.lower()
         cuff_user = coordinator.cuff_user
         self._attr_unique_id = f"{address}_{cuff_user}_{description.key}"
         self._attr_device_info = DeviceInfo(

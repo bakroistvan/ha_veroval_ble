@@ -69,6 +69,11 @@ def _stub_homeassistant() -> None:
         def _async_handle_unavailable(self, service_info: object) -> None:
             return None
 
+        def _async_handle_bluetooth_event(
+            self, service_info: object, change: object
+        ) -> None:
+            return None
+
     active.ActiveBluetoothDataUpdateCoordinator = ActiveBluetoothDataUpdateCoordinator
 
     class ConfigEntry:
@@ -132,7 +137,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 _const, _parser, _coordinator = _load_coordinator()
 DUMP_IDLE_SECONDS = _const.DUMP_IDLE_SECONDS
 DUMP_TIMEOUT_SECONDS = _const.DUMP_TIMEOUT_SECONDS
-POLL_WINDOW_GAP_SECONDS = _const.POLL_WINDOW_GAP_SECONDS
+PHONE_GRACE_SECONDS = _const.PHONE_GRACE_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
 VerovalBleCoordinator = _coordinator.VerovalBleCoordinator
 BloodPressureMeasurement = _parser.BloodPressureMeasurement
@@ -206,7 +211,20 @@ def test_dump_timeout_covers_full_two_user_stream() -> None:
 
 def test_two_coordinators_share_one_dump() -> None:
     """User 1 dump with mixed records; User 2 selects locally without a second GATT."""
-    data = VerovalBleDeviceData()
+    stamp1 = datetime(2024, 6, 1, 10, 0, 0)
+    stamp2 = datetime(2024, 6, 1, 10, 0, 5)
+
+    class _Utc:
+        def __init__(self) -> None:
+            self.values = [stamp1, stamp2]
+            self.i = 0
+
+        def __call__(self) -> datetime:
+            value = self.values[min(self.i, len(self.values) - 1)]
+            self.i += 1
+            return value
+
+    data = VerovalBleDeviceData(utcnow=_Utc())
     user1_latest = _measurement(
         user_id=BLE_USER_1,
         timestamp=datetime(2024, 1, 15, 12, 0, 0),
@@ -248,11 +266,28 @@ def test_two_coordinators_share_one_dump() -> None:
     assert second is user2_latest
     assert coord1.last_measurement is user1_latest
     assert coord2.last_measurement is user2_latest
+    assert data.last_synchronized[CUFF_USER_1] == stamp1
+    assert data.last_synchronized[CUFF_USER_2] == stamp2
+    assert coord1.last_synchronized == stamp1
+    assert coord2.last_synchronized == stamp2
 
 
-def test_truncated_dump_user_2_does_not_reconnect() -> None:
-    """Timeout can leave only User 1 records; User 2 must not start a second connect."""
-    data = VerovalBleDeviceData()
+def test_truncated_dump_user_2_still_stamps_last_synchronized() -> None:
+    """User 2 consuming a shared dump with no User 2 records still stamps sync."""
+    stamp1 = datetime(2024, 6, 1, 10, 0, 0)
+    stamp2 = datetime(2024, 6, 1, 10, 0, 5)
+
+    class _Utc:
+        def __init__(self) -> None:
+            self.values = [stamp1, stamp2]
+            self.i = 0
+
+        def __call__(self) -> datetime:
+            value = self.values[min(self.i, len(self.values) - 1)]
+            self.i += 1
+            return value
+
+    data = VerovalBleDeviceData(utcnow=_Utc())
     user1 = _measurement(
         user_id=BLE_USER_1,
         timestamp=datetime(2024, 1, 15, 12, 0, 0),
@@ -271,6 +306,8 @@ def test_truncated_dump_user_2_does_not_reconnect() -> None:
     assert first is user1
     assert second is None
     assert data.last_measurement.get(CUFF_USER_2) is None
+    assert data.last_synchronized[CUFF_USER_1] == stamp1
+    assert data.last_synchronized[CUFF_USER_2] == stamp2
 
 
 def test_user_1_last_measurement_unchanged_after_user_2_poll() -> None:
@@ -364,7 +401,8 @@ def test_mark_window_ended_keeps_shared_dump_cache() -> None:
 
 
 def test_needs_poll_passes_cuff_user() -> None:
-    data = VerovalBleDeviceData()
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
     seen: list[int | None] = []
     original = data.poll_needed
 
@@ -383,17 +421,20 @@ def test_needs_poll_passes_cuff_user() -> None:
     _coordinator.async_ble_device_from_address = lambda *args, **kwargs: object()
     try:
         service_info = SimpleNamespace(device=_FakeBleDevice())
+        assert coord._async_needs_poll(service_info, None) is False
+        clock.now = PHONE_GRACE_SECONDS
         assert coord._async_needs_poll(service_info, None) is True
-        assert seen == [CUFF_USER_2]
+        assert seen == [CUFF_USER_2, CUFF_USER_2]
     finally:
         _coordinator.async_ble_device_from_address = previous
 
 
 def test_window_end_allows_new_dump_and_clears_cache() -> None:
-    """Consumed slots must not block the next advertise window forever.
+    """Consumed slots must not block the next advertise window.
 
     mark_window_ended keeps the dump cache so User 2 can still consume it.
-    A new GATT dump starts after POLL_WINDOW_GAP_SECONDS expires the cache.
+    The next advertisement for a consumed slot starts a new window, then
+    phone grace, then a new GATT dump.
     """
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
@@ -430,11 +471,10 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
         await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
         data.mark_window_ended()
         assert data._window_records is not None
-        assert data.poll_needed(object(), None) is False
         assert data.poll_needed(object(), None, CUFF_USER_1) is False
-        clock.now = POLL_WINDOW_GAP_SECONDS
-        assert data.poll_needed(object(), None) is True
         assert data._window_records is None
+        assert data._grace_started_at == 0.0
+        clock.now = PHONE_GRACE_SECONDS
         assert data.poll_needed(object(), None, CUFF_USER_1) is True
         return await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
 
@@ -445,3 +485,60 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
     assert data.last_measurement[CUFF_USER_2] is first_user2
     assert data._window_records == [second_user1]
     assert data._consumed_slots == {CUFF_USER_1}
+
+
+def test_idle_unavailable_user_2_still_consumes_cache() -> None:
+    """User 2 can still take the shared dump after idle unavailable."""
+    data = VerovalBleDeviceData()
+    user1 = _measurement(
+        user_id=BLE_USER_1,
+        timestamp=datetime(2024, 1, 15, 12, 0, 0),
+    )
+    user2 = _measurement(
+        user_id=BLE_USER_2,
+        timestamp=datetime(2024, 1, 14, 9, 30, 0),
+        systolic=130.0,
+    )
+    _patch_dump([user1, user2])
+
+    async def run() -> None:
+        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+
+    asyncio.run(run())
+    data.mark_window_ended()
+    assert data.poll_needed(object(), None, CUFF_USER_2) is True
+    assert data._window_records is not None
+    assert CUFF_USER_1 in data._consumed_slots
+
+
+def test_shared_grace_user_2_does_not_restart_wait() -> None:
+    """User 1 and User 2 share one grace; after the dump, User 2 uses the cache."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    user1 = _measurement(
+        user_id=BLE_USER_1,
+        timestamp=datetime(2024, 1, 15, 12, 0, 0),
+    )
+    user2 = _measurement(
+        user_id=BLE_USER_2,
+        timestamp=datetime(2024, 1, 14, 9, 30, 0),
+        systolic=130.0,
+    )
+    calls = _patch_dump([user1, user2])
+
+    assert data.poll_needed(object(), None, CUFF_USER_1) is False
+    started = data._grace_started_at
+    assert data.poll_needed(object(), None, CUFF_USER_2) is False
+    assert data._grace_started_at == started
+
+    clock.now = PHONE_GRACE_SECONDS
+    assert data.poll_needed(object(), None, CUFF_USER_1) is True
+
+    async def run() -> object:
+        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+        assert data.poll_needed(object(), None, CUFF_USER_2) is True
+        return await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
+
+    second = asyncio.run(run())
+    assert calls["n"] == 1
+    assert second is user2

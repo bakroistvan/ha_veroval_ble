@@ -1,17 +1,30 @@
-# ha_veroval_ble
+# Veroval Blood Pressure BLE
 
-Home Assistant custom integration (**Veroval Blood Pressure BLE**) for the **Veroval compact+ BPU 26** blood pressure cuff (BLE name `BPU26`). Domain: `veroval_ble`.
+[![GitHub release](https://img.shields.io/github/v/release/bakroistvan/ha_veroval_ble?style=flat-square)](https://github.com/bakroistvan/ha_veroval_ble/releases)
+[![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg?style=flat-square)](https://github.com/hacs/integration)
+[![License](https://img.shields.io/github/license/bakroistvan/ha_veroval_ble?style=flat-square)](LICENSE)
+[![Validate](https://img.shields.io/github/actions/workflow/status/bakroistvan/ha_veroval_ble/validate.yml?branch=main&label=validate&style=flat-square)](https://github.com/bakroistvan/ha_veroval_ble/actions/workflows/validate.yml)
+
+Home Assistant custom integration for the **Veroval compact+ BPU 26** blood pressure cuff (BLE name `BPU26`). Domain: `veroval_ble`.
+
+It pairs on the **Home Assistant host Bluetooth adapter**, drains the cuff history dump, and publishes the newest reading for the selected **User 1** or **User 2** slot.
 
 **Not for diagnosis, treatment, or medical decision-making.** Readings are for personal tracking only.
 
+[![Open your Home Assistant instance and open this repository inside HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bakroistvan&repository=ha_veroval_ble&category=integration)
+
 ## Requirements
 
-- Home Assistant 2024.8.0 or later
+- Home Assistant **2024.8.0** or later
 - A **local Bluetooth adapter on the Home Assistant host** (built-in, USB dongle, or HAOS Bluetooth)
 
 **ESPHome Bluetooth Proxy is not supported for pairing** — there is no PIN UI on the proxy. Later GATT sessions are also likely to fail unless that same radio holds the bond (LTK). Pair and poll on the host adapter.
 
-## Install (HACS)
+## Install
+
+### HACS (custom repository)
+
+This integration is not in the HACS default store yet. Add it as a custom repository, or use the My Home Assistant button above.
 
 1. [HACS](https://hacs.xyz/) → **Integrations** → ⋮ → **Custom repositories**
 2. Repository URL: `https://github.com/bakroistvan/ha_veroval_ble`  
@@ -20,6 +33,12 @@ Home Assistant custom integration (**Veroval Blood Pressure BLE**) for the **Ver
 4. Restart Home Assistant
 
 Confirm Bluetooth is already set up under **Settings → Devices & services**.
+
+### Manual
+
+1. Download the latest release archive from [Releases](https://github.com/bakroistvan/ha_veroval_ble/releases).
+2. Copy `custom_components/veroval_ble` into `/config/custom_components/veroval_ble`.
+3. Restart Home Assistant.
 
 ## Wake the cuff
 
@@ -63,6 +82,8 @@ Sensors belong to **that slot only**. A second person can add the same cuff agai
 
 Each sync **drains** the BLE history dump, then publishes the record with the **newest timestamp for the selected slot** — not the first packet.
 
+After the cuff starts advertising, Home Assistant **waits 20 seconds** before connecting so **medi.connect** can take the transfer first. If the Bluetooth symbol goes out during that wait (the phone connected), Home Assistant skips that window. Pairing still needs a single bond — unpair the phone during setup. This wait does not keep both the phone and Home Assistant paired at once. A later advertise window (new measurement) starts the same 20-second wait; **Force data sync** (`veroval_ble.force_dump`) connects immediately.
+
 **Delete:** Removing the **last** Veroval device for a cuff also removes the host Bluetooth bond. Deleting only one of two user slots (User 1 or User 2) leaves the bond so the other slot keeps working.
 
 ## Sensors
@@ -73,6 +94,8 @@ Each sync **drains** the BLE history dump, then publishes the record with the **
 | Diastolic | mmHg |
 | Pulse | bpm |
 | Measured time | Cuff timestamp of the published reading |
+| Last synchronized | Home Assistant time of the last successful dump for this slot |
+| Connected | Diagnostic: **on** while the Home Assistant host Bluetooth adapter has a GATT link to the cuff (`bluetoothctl` **Connected: yes**), **off** when the cuff is asleep or only advertising. |
 | User slot | Label **User 1** / **User 2** |
 | Irregular pulse | Binary sensor (not atrial fibrillation) |
 
@@ -112,11 +135,17 @@ See **[docs/DEBUG.md](docs/DEBUG.md)** for debug logging (UI, YAML, and `logger.
 
 Typical causes: advertise window expired (press User 1/2 again), host not paired/trusted, medi.connect or a phone still bonded, or Bluetooth Proxy used instead of the host adapter.
 
+To force a dump while Bluetooth is flashing: **Developer tools → Actions → Veroval Blood Pressure BLE: Force data sync** (`veroval_ble.force_dump`). See **[docs/DEBUG.md](docs/DEBUG.md)**.
+
 ## Protocol and captures
 
 - [docs/protocol.md](docs/protocol.md) — decoded BLE protocol
 - [docs/DEBUG.md](docs/DEBUG.md) — Home Assistant debug logging
 - [docs/captures/README.md](docs/captures/README.md) — HCI snoop capture guide
+
+## Releases
+
+HACS uses **published GitHub Releases**, not loose tags. Bump `version` in `custom_components/veroval_ble/manifest.json`, add a [CHANGELOG](CHANGELOG.md) section, then tag that same version (for example `0.1.0`) and push the tag. CI creates the GitHub Release.
 
 ## License
 

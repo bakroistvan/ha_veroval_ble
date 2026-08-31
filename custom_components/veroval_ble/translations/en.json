@@ -16,7 +16,7 @@
       },
       "not_found": {
         "title": "Cuff not found",
-        "description": "No BPU26 advertisement in the last {seconds} seconds.\n\nPress **User 1** or **User 2** so Bluetooth flashes, then tap **Scan again**. Or paste the Bluetooth address from `bluetoothctl`.",
+        "description": "No BPU26 advertisement was seen on the Home Assistant **host** Bluetooth adapter in the last {seconds} seconds.\n\nA **Discovered** card can come from a Bluetooth proxy; pairing cannot. Press **User 1** or **User 2** so Bluetooth flashes while the cuff is next to the Home Assistant machine (not only a proxy), then tap **Scan again**. Or paste the address from host `bluetoothctl` — the Discovered MAC alone is not a host Device1.",
         "submit": "Scan again",
         "data": {
           "address": "Bluetooth address (optional)"
@@ -53,7 +53,7 @@
       "invalid_pin": "Enter the 6-digit PIN shown on the cuff.",
       "pairing_failed": "Pairing failed ({error}). Press User 1 or User 2 so Bluetooth flashes, then try again.",
       "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again.",
-      "device_not_found": "BlueZ does not know this cuff yet. Press User 1 or User 2 so Bluetooth flashes, then tap Scan again."
+      "device_not_found": "Home Assistant’s Discovered card is not enough. BlueZ has no Device1 for this address on the host adapter, so it cannot pair. A Bluetooth proxy cannot enter the cuff PIN. Press User 1 or User 2 near the Home Assistant machine, then tap Scan again."
     },
     "abort": {
       "not_supported": "Device not supported",
@@ -63,8 +63,9 @@
       "pairing_not_supported": "In-UI pairing requires a Bluetooth adapter on the Home Assistant OS host (Linux BlueZ).",
       "proxy_not_supported": "This cuff was only seen via a Bluetooth proxy. Pairing needs the Home Assistant host adapter (built-in or USB). ESPHome Bluetooth Proxy cannot enter the cuff PIN.",
       "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again.",
-      "device_not_found": "BlueZ does not know this cuff yet. Press User 1 or User 2 so Bluetooth flashes, then scan again from the host adapter.",
-      "pairing_failed": "Pairing failed ({error}). Press User 1 or User 2 so Bluetooth flashes, unpair medi.connect, and try again."
+      "device_not_found": "BlueZ has no Device1 for this address on the host adapter. A Discovered card or Bluetooth proxy is not enough to pair. Press User 1 or User 2 near the Home Assistant machine, then scan again.",
+      "pairing_failed": "Pairing failed ({error}). Press User 1 or User 2 so Bluetooth flashes, unpair medi.connect, and try again.",
+      "stale_advertisement": "That BPU26 discovery is from Home Assistant’s advertisement cache, not a live advertise window. Press User 1 or User 2 so Bluetooth flashes, then try again."
     }
   },
   "entity": {
@@ -86,11 +87,29 @@
       },
       "rssi": {
         "name": "RSSI"
+      },
+      "last_synchronized": {
+        "name": "Last synchronized"
       }
     },
     "binary_sensor": {
       "irregular_pulse": {
         "name": "Irregular pulse"
+      },
+      "connected": {
+        "name": "Connected"
+      }
+    }
+  },
+  "services": {
+    "force_dump": {
+      "name": "Force data sync",
+      "description": "Connect now and drain stored measurements, ignoring the advertise-window skip. Press User 1 or User 2 so Bluetooth flashes first.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "User slot to sync. Leave empty to sync every configured BPU26."
+        }
       }
     }
   }

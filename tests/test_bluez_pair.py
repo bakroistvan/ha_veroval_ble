@@ -7,6 +7,7 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,10 @@ BlueZPairSession = _bluez_pair.BlueZPairSession
 format_device_snapshot = _bluez_pair.format_device_snapshot
 format_pairing_error = _bluez_pair.format_pairing_error
 PairingFailedError = _bluez_pair.PairingFailedError
+is_local_bluez_device = _bluez_pair.is_local_bluez_device
+bluez_path_from_device = _bluez_pair.bluez_path_from_device
+rssi_from_device_props = _bluez_pair.rssi_from_device_props
+connected_from_device_props = _bluez_pair.connected_from_device_props
 
 
 class _FakeDBusError(Exception):
@@ -81,6 +86,32 @@ def test_format_device_snapshot_unwraps_variants() -> None:
     assert "Connected=True" in snapshot
     assert "RSSI=-67" in snapshot
     assert "UUIDs" not in snapshot
+
+
+def test_rssi_from_device_props_missing_while_asleep() -> None:
+    assert rssi_from_device_props({}) is None
+    assert rssi_from_device_props({"Name": "BPU26"}) is None
+
+
+def test_rssi_from_device_props_unwraps_variant() -> None:
+    class _Variant:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+    assert rssi_from_device_props({"RSSI": _Variant(-54)}) == -54
+    assert rssi_from_device_props({"RSSI": -65}) == -65
+    assert rssi_from_device_props({"RSSI": True}) is None
+
+
+def test_connected_from_device_props_matches_bluetoothctl() -> None:
+    class _Variant:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+    assert connected_from_device_props({}) is False
+    assert connected_from_device_props({"Connected": False}) is False
+    assert connected_from_device_props({"Connected": True}) is True
+    assert connected_from_device_props({"Connected": _Variant(True)}) is True
 
 
 def test_provide_passkey_second_call_does_not_raise() -> None:
@@ -166,3 +197,58 @@ def test_display_passkey_and_pin_code_do_not_log_secret(
     assert f"entered={entered}" in caplog.text
     assert "DisplayPinCode" in caplog.text
     assert "RequestConfirmation" in caplog.text
+
+
+def test_is_local_bluez_device_accepts_hci_path() -> None:
+    device = SimpleNamespace(
+        details={"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"}
+    )
+    assert is_local_bluez_device(device) is True
+    assert (
+        bluez_path_from_device(device) == "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"
+    )
+
+
+def test_is_local_bluez_device_nested_path_not_props() -> None:
+    nested = SimpleNamespace(
+        details={"details": {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"}}
+    )
+    assert is_local_bluez_device(nested) is True
+    assert is_local_bluez_device(
+        SimpleNamespace(details={"props": {"Address": "AA:BB:CC:DD:EE:FF"}})
+    ) is False
+    assert is_local_bluez_device(
+        SimpleNamespace(
+            details={"props": {"path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF"}}
+        )
+    ) is False
+
+
+def test_is_local_bluez_device_false_for_empty_and_proxy() -> None:
+    assert is_local_bluez_device(SimpleNamespace(details={})) is False
+    assert is_local_bluez_device(SimpleNamespace(details=None)) is False
+    assert is_local_bluez_device(
+        SimpleNamespace(details={"source": "esphome-kitchen"})
+    ) is False
+
+
+def test_device_resolve_retry_window_is_about_eight_seconds() -> None:
+    assert (
+        _bluez_pair.DEVICE_RESOLVE_ATTEMPTS
+        * _bluez_pair.DEVICE_RESOLVE_INTERVAL_SECONDS
+        >= 8
+    )
+
+
+def test_start_discovery_noop_when_unsupported() -> None:
+    original = _bluez_pair.is_bluez_pairing_supported
+    _bluez_pair.is_bluez_pairing_supported = lambda: False
+    try:
+
+        async def _run() -> None:
+            stopper = await _bluez_pair.async_start_host_adapter_discovery()
+            await stopper()
+
+        asyncio.run(_run())
+    finally:
+        _bluez_pair.is_bluez_pairing_supported = original
