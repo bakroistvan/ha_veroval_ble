@@ -43,7 +43,12 @@ def _ensure_device_registry() -> ModuleType:
 
         _registry.async_get = _registry_get
         device_registry._registry = _registry
-        device_registry.async_get = lambda _hass: _registry
+    registry = device_registry._registry
+    if getattr(registry, "_devices", None) is None:
+        registry._devices = {}
+    if getattr(registry, "async_get", None) is None:
+        registry.async_get = lambda device_id: registry._devices.get(device_id)
+    device_registry.async_get = lambda _hass: device_registry._registry
     return device_registry
 
 
@@ -111,6 +116,11 @@ def _stub_modules() -> None:
             return None
 
         def _async_handle_unavailable(self, service_info: object) -> None:
+            return None
+
+        def _async_handle_bluetooth_event(
+            self, service_info: object, change: object
+        ) -> None:
             return None
 
     active.ActiveBluetoothDataUpdateCoordinator = ActiveBluetoothDataUpdateCoordinator
@@ -262,7 +272,7 @@ def test_device_id_selects_one_slot() -> None:
     ]
     ident = ("veroval_ble", "AA:BB:CC:DD:EE:FF_1")
     device = SimpleNamespace(identifiers={ident})
-    registry = sys.modules["homeassistant.helpers.device_registry"]._registry
+    registry = _services.dr.async_get(SimpleNamespace())
     registry._devices["dev-user-1"] = device
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(async_entries=lambda _domain: entries)

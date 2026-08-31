@@ -64,7 +64,8 @@
       "proxy_not_supported": "This cuff was only seen via a Bluetooth proxy. Pairing needs the Home Assistant host adapter (built-in or USB). ESPHome Bluetooth Proxy cannot enter the cuff PIN.",
       "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again.",
       "device_not_found": "BlueZ has no Device1 for this address on the host adapter. A Discovered card or Bluetooth proxy is not enough to pair. Press User 1 or User 2 near the Home Assistant machine, then scan again.",
-      "pairing_failed": "Pairing failed ({error}). Press User 1 or User 2 so Bluetooth flashes, unpair medi.connect, and try again."
+      "pairing_failed": "Pairing failed ({error}). Press User 1 or User 2 so Bluetooth flashes, unpair medi.connect, and try again.",
+      "stale_advertisement": "That BPU26 discovery is from Home Assistant’s advertisement cache, not a live advertise window. Press User 1 or User 2 so Bluetooth flashes, then try again."
     }
   },
   "entity": {
@@ -94,13 +95,22 @@
     "binary_sensor": {
       "irregular_pulse": {
         "name": "Irregular pulse"
+      },
+      "connected": {
+        "name": "Connected"
       }
     }
   },
   "services": {
     "force_dump": {
       "name": "Force data sync",
-      "description": "Connect now and drain stored measurements, ignoring the advertise-window skip. Press User 1 or User 2 so Bluetooth flashes first."
+      "description": "Connect now and drain stored measurements, ignoring the advertise-window skip. Press User 1 or User 2 so Bluetooth flashes first.",
+      "fields": {
+        "device_id": {
+          "name": "Device",
+          "description": "User slot to sync. Leave empty to sync every configured BPU26."
+        }
+      }
     }
   }
 }

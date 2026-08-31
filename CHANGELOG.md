@@ -10,10 +10,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- 60-second phone-first grace so medi.connect can take the cuff before Home Assistant connects. Unavailable during the wait skips that window.
+- 20-second phone-first grace so medi.connect can take the cuff before Home Assistant connects. Unavailable during the wait skips that window.
 - New advertise window after idle unavailable or 20s advertisement silence (no 180s mute after setup). Fixes subsequent-measurement skip.
 - Developer action `veroval_ble.force_dump` to sync immediately, including during grace.
 - Last-synchronized diagnostic timestamp sensor per user slot.
+- Connected diagnostic binary sensor: on while the host adapter has a GATT link to the cuff (`bluetoothctl` Connected: yes), including during a dump.
+
+### Fixed
+
+- Cached Bluetooth advertisements no longer keep the advertise window open after the cuff sleeps, so a later measurement can start a new dump. Stale discoveries no longer show an Add card.
+- `force_dump` uses a device selector (hassfest no longer allows a device filter on `target`).
+- A 20s phone-grace timer starts the dump even when Home Assistant sends no further advertisements.
 - Cloud Agent `environment.json`, HACS packaging (LICENSE, brand icon, CI, issue templates).
 
 ## [0.1.0] - 2026-08-29

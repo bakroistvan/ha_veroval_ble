@@ -120,7 +120,7 @@ async def async_force_dump_coordinators(
     return results
 
 
-async def async_setup_services(hass: HomeAssistant) -> None:
+def async_setup_services(hass: HomeAssistant) -> None:
     """Register debug actions once."""
     if hass.data.get(_SERVICES_FLAG):
         return

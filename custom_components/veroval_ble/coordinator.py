@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from bleak.backends.device import BLEDevice
 
@@ -22,12 +23,18 @@ from homeassistant.components.bluetooth.active_update_coordinator import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CoreState, HomeAssistant, callback
 
+from .advertisement import advertisement_is_live, advertisement_monotonic_time
+from .bluez_pair import async_watch_device_rssi, is_bluez_pairing_supported
 from .client import dump_latest
 from .const import (
     AD_SILENCE_NEW_WINDOW_SECONDS,
+    BLUEZ_RSSI_POLL_SECONDS,
+    CUFF_ADVERTISE_SECONDS,
+    DOMAIN,
     PHONE_GRACE_SECONDS,
     POLL_WINDOW_GAP_SECONDS,
     UPDATE_INTERVAL,
+    normalize_ble_address,
 )
 from .parser import (
     BloodPressureMeasurement,
@@ -54,6 +61,15 @@ def _advertisement_address(service_info: object) -> str:
     if address:
         return str(address)
     return "unknown"
+
+
+def _live_sighting(address: str, now: float) -> object:
+    """Build a poll_needed argument whose scanner stamp is *now* (age 0)."""
+    return SimpleNamespace(
+        time=now,
+        address=address,
+        device=SimpleNamespace(address=address),
+    )
 
 
 def _address_lock(address: str) -> asyncio.Lock:
@@ -87,17 +103,64 @@ class VerovalBleDeviceData:
         self._polled_this_window = False
         self._window_polled_at: float | None = None
         self._last_ad_time: float | None = None
+        self._last_live_ad_time: float | None = None
+        self._last_ad_stamp: float | None = None
+        self._stale_ad_logged = False
         self._awaiting_new_window = False
         self._window_records: list[BloodPressureMeasurement] | None = None
         self._consumed_slots: set[int] = set()
         self._grace_started_at: float | None = None
         self._grace_address: str | None = None
         self._grace_elapsed_logged = False
+        self._grace_timer: object | None = None
         self._window_skipped = False
+        self.bluez_connected = False
+        self._connected_listeners: list[Callable[[], None]] = []
+
+    def async_add_connected_listener(
+        self, listener: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Notify *listener* when host Connected or an in-progress dump changes."""
+        self._connected_listeners.append(listener)
+
+        def _remove() -> None:
+            try:
+                self._connected_listeners.remove(listener)
+            except ValueError:
+                pass
+
+        return _remove
+
+    def _notify_connected(self) -> None:
+        for listener in list(self._connected_listeners):
+            listener()
+
+    def set_bluez_connected(self, connected: bool) -> None:
+        """Record Device1 Connected from the BlueZ radio watch."""
+        if self.bluez_connected == connected:
+            return
+        self.bluez_connected = connected
+        self._notify_connected()
+
+    @property
+    def is_connected(self) -> bool:
+        """True while the host adapter has a GATT link, or a dump holds the lock."""
+        return self.bluez_connected or self._poll_lock.locked()
+
+    def cancel_grace_timer(self) -> None:
+        """Cancel the delayed dump that runs when HA sends no further ads."""
+        handle = self._grace_timer
+        if handle is None:
+            return
+        cancel = getattr(handle, "cancel", None)
+        if cancel is not None:
+            cancel()
+        self._grace_timer = None
 
     def _begin_new_window(self, reason: str) -> None:
         """Clear dump-skip and grace state so the next ad can start a GATT dump."""
         _LOGGER.debug("Starting new advertise window (%s)", reason)
+        self.cancel_grace_timer()
         self._polled_this_window = False
         self._window_polled_at = None
         self._window_records = None
@@ -109,7 +172,7 @@ class VerovalBleDeviceData:
         self._window_skipped = False
 
     def _grace_in_progress(self) -> bool:
-        """True while waiting for the phone, including after the 60s elapsed."""
+        """True while waiting for the phone, including after grace elapsed."""
         return (
             self._grace_started_at is not None
             and not self._window_skipped
@@ -123,7 +186,7 @@ class VerovalBleDeviceData:
         last_poll: float | None,
         now: float,
     ) -> bool:
-        """Start or continue the 60s phone-first wait; True when a dump may start."""
+        """Start or continue the phone-first wait; True when a dump may start."""
         address = _advertisement_address(service_info)
         if self._grace_started_at is None:
             self._grace_started_at = now
@@ -147,6 +210,34 @@ class VerovalBleDeviceData:
             return
         self._begin_new_window("poll-window gap expired")
 
+    def is_advertising(self, now: float | None = None) -> bool:
+        """True while a live sighting is still recent (not the full 2 min flash)."""
+        if self._last_live_ad_time is None:
+            return False
+        if now is None:
+            now = self._monotonic()
+        return now - self._last_live_ad_time < CUFF_ADVERTISE_SECONDS
+
+    def grace_dump_due(self, now: float | None = None) -> bool:
+        """True when phone grace elapsed and no dump has run this window."""
+        if not self._grace_in_progress():
+            return False
+        if self._grace_started_at is None:
+            return False
+        if now is None:
+            now = self._monotonic()
+        return now - self._grace_started_at >= PHONE_GRACE_SECONDS
+
+    def _advertisement_is_live(self, service_info: object, now: float) -> bool:
+        """Return True if this callback is a real, new advertisement."""
+        return advertisement_is_live(
+            service_info,
+            now,
+            max_age=AD_SILENCE_NEW_WINDOW_SECONDS,
+            require_timestamp=False,
+            last_seen_stamp=self._last_ad_stamp,
+        )
+
     def poll_needed(
         self,
         service_info: BluetoothServiceInfoBleak,  # noqa: ARG002
@@ -159,12 +250,28 @@ class VerovalBleDeviceData:
         another connect). Pass *cuff_user* so the other slot can consume the
         shared dump without a second connection.
 
-        A new window starts when advertisements have been gone long enough
-        (silence or idle unavailable), not only after ``POLL_WINDOW_GAP_SECONDS``.
-        A fresh GATT connect still waits ``PHONE_GRACE_SECONDS`` so medi.connect
-        can take the transfer. Shared-cache consume and ``force_dump`` do not.
+        A new window starts when *live* advertisements have been gone long
+        enough (silence or idle unavailable), not only after
+        ``POLL_WINDOW_GAP_SECONDS``. Cached scanner callbacks do not refresh
+        the last-ad clock. A fresh GATT connect still waits
+        ``PHONE_GRACE_SECONDS`` so medi.connect can take the transfer.
+        Shared-cache consume and ``force_dump`` do not.
         """
         now = self._monotonic()
+        if not self._advertisement_is_live(service_info, now):
+            if not self._stale_ad_logged:
+                _LOGGER.debug(
+                    "Ignoring stale or cached advertisement for %s",
+                    _advertisement_address(service_info),
+                )
+                self._stale_ad_logged = True
+            return False
+        self._stale_ad_logged = False
+        stamp = advertisement_monotonic_time(service_info)
+        if stamp is not None:
+            self._last_ad_stamp = stamp
+        self._last_live_ad_time = now
+
         self._expire_stale_window(now)
 
         if self._poll_lock.locked():
@@ -173,7 +280,7 @@ class VerovalBleDeviceData:
         if self._window_skipped:
             return False
 
-        # Scanner gaps during the 60s wait must not look like a new window.
+        # Scanner gaps during phone grace must not look like a new window.
         if self._grace_in_progress():
             self._last_ad_time = now
             return self._phone_grace_allows_poll(service_info, last_poll, now)
@@ -236,6 +343,7 @@ class VerovalBleDeviceData:
             return
         if self._grace_in_progress():
             label = address or self._grace_address or "unknown"
+            self.cancel_grace_timer()
             self._window_skipped = True
             self._window_polled_at = self._monotonic()
             self._grace_started_at = None
@@ -250,6 +358,7 @@ class VerovalBleDeviceData:
             self._window_polled_at = None
 
     def _mark_polled_this_window(self) -> None:
+        self.cancel_grace_timer()
         self._polled_this_window = True
         now = self._monotonic()
         self._window_polled_at = now
@@ -296,7 +405,11 @@ class VerovalBleDeviceData:
         self._window_records = None
         self._consumed_slots.clear()
 
-        result = await dump_latest(ble_device, cuff_user)
+        self._notify_connected()
+        try:
+            result = await dump_latest(ble_device, cuff_user)
+        finally:
+            self._notify_connected()
         if result.auth_error or result.missing_characteristic:
             return self.last_measurement.get(cuff_user)
 
@@ -350,6 +463,7 @@ class VerovalBleCoordinator(
         self.cuff_user = cuff_user
         self.device_data = device_data
         self.rssi: int | None = None
+        address = normalize_ble_address(address)
         super().__init__(
             hass,
             _LOGGER,
@@ -371,6 +485,165 @@ class VerovalBleCoordinator(
         """Home Assistant time of the last successful dump for this cuff user."""
         return self.device_data.last_synchronized.get(self.cuff_user)
 
+    @property
+    def is_advertising(self) -> bool:
+        """True while the last live sighting (HA ad or BlueZ RSSI) is still recent."""
+        return self.device_data.is_advertising()
+
+    @property
+    def is_connected(self) -> bool:
+        """True while the host adapter is in a GATT session with the cuff."""
+        return self.device_data.is_connected
+
+    def _ensure_grace_timer(self) -> None:
+        """Dump after phone grace even if Home Assistant sends no further advertisements."""
+        data = self.device_data
+        if not data._grace_in_progress() or data._grace_started_at is None:
+            return
+        if data._grace_timer is not None:
+            return
+        delay = max(
+            0.0,
+            PHONE_GRACE_SECONDS - (data._monotonic() - data._grace_started_at),
+        )
+        loop = getattr(self.hass, "loop", None)
+        call_later = getattr(loop, "call_later", None)
+        if call_later is None:
+            return
+        data._grace_timer = call_later(delay, self._async_grace_timer_fired)
+
+    @callback
+    def _async_grace_timer_fired(self) -> None:
+        """Phone grace elapsed; start the dump without waiting for another ad."""
+        self.device_data._grace_timer = None
+        create_task = getattr(self.hass, "async_create_task", None)
+        if create_task is None:
+            return
+        create_task(self._async_grace_elapsed_poll())
+
+    async def _async_grace_elapsed_poll(self) -> None:
+        """Connect after phone grace when advertisement callbacks have stopped."""
+        if not self.device_data.grace_dump_due():
+            return
+        if self.hass.state is not CoreState.running:
+            return
+        connectable_device = async_ble_device_from_address(
+            self.hass, self.address, connectable=True
+        )
+        if connectable_device is None:
+            _LOGGER.debug(
+                "Phone grace elapsed; no connectable BLEDevice for %s",
+                self.address,
+            )
+            return
+        _LOGGER.debug(
+            "Phone grace elapsed; polling %s cuff_user=%s (no further ads)",
+            self.address,
+            self.cuff_user,
+        )
+        measurement = await self.device_data.async_poll(
+            connectable_device, self.cuff_user
+        )
+        self._publish_shared_slots(measurement)
+
+    def _publish_shared_slots(
+        self, measurement: BloodPressureMeasurement | None
+    ) -> None:
+        """Publish this slot and let the other user consume the same dump."""
+        self.async_publish_measurement(measurement)
+        config_entries = getattr(self.hass, "config_entries", None)
+        async_entries = getattr(config_entries, "async_entries", None)
+        if async_entries is None:
+            return
+        for entry in async_entries(DOMAIN):
+            other = getattr(entry, "runtime_data", None)
+            if not isinstance(other, VerovalBleCoordinator) or other is self:
+                continue
+            if other.address.lower() != self.address.lower():
+                continue
+            other.async_publish_measurement(
+                other.device_data.consume_shared_dump(other.cuff_user)
+            )
+
+    def async_start_bluez_rssi_watch(self) -> Callable[[], None]:
+        """Watch BlueZ Device1 RSSI and Connected on the host adapter."""
+        unsub = self.device_data.async_add_connected_listener(
+            self.async_update_listeners
+        )
+        if not is_bluez_pairing_supported():
+            return unsub
+        create_task = getattr(self.hass, "async_create_task", None)
+        if create_task is None:
+            return unsub
+        task = create_task(
+            async_watch_device_rssi(
+                self.address,
+                self.async_handle_bluez_rssi,
+                BLUEZ_RSSI_POLL_SECONDS,
+                on_connected=self.async_handle_bluez_connected,
+            )
+        )
+
+        def _stop() -> None:
+            task.cancel()
+            unsub()
+
+        return _stop
+
+    @callback
+    def async_handle_bluez_connected(self, connected: bool) -> None:
+        """Mirror Device1 Connected from bluetoothctl onto the diagnostic."""
+        if self.hass.state is not CoreState.running:
+            return
+        if connected != self.device_data.bluez_connected:
+            _LOGGER.debug(
+                "BlueZ Device1 Connected=%s for %s",
+                connected,
+                self.address,
+            )
+        self.device_data.set_bluez_connected(connected)
+
+    @callback
+    def async_handle_bluez_rssi(self, rssi: int) -> None:
+        """Treat a Device1 RSSI update as a live advertisement."""
+        if self.hass.state is not CoreState.running:
+            return
+        self.rssi = rssi
+        now = self.device_data._monotonic()
+        if not self.device_data.is_advertising(now):
+            _LOGGER.debug(
+                "BlueZ Device1 RSSI %s for %s (HA scanner had no live ad)",
+                rssi,
+                self.address,
+            )
+        sighting = _live_sighting(self.address, now)
+        last_poll = getattr(self, "_last_poll", None)
+        needed = self.device_data.poll_needed(sighting, last_poll, self.cuff_user)
+        self._ensure_grace_timer()
+        if needed:
+            create_task = getattr(self.hass, "async_create_task", None)
+            if create_task is not None:
+                create_task(self._async_poll_connectable())
+        self.async_update_listeners()
+
+    async def _async_poll_connectable(self) -> None:
+        """Drain the dump when a live sighting says a GATT poll is due."""
+        if self.hass.state is not CoreState.running:
+            return
+        connectable_device = async_ble_device_from_address(
+            self.hass, self.address, connectable=True
+        )
+        if connectable_device is None:
+            _LOGGER.debug(
+                "Live sighting; no connectable BLEDevice for %s",
+                self.address,
+            )
+            return
+        measurement = await self.device_data.async_poll(
+            connectable_device, self.cuff_user
+        )
+        self._publish_shared_slots(measurement)
+
     def _async_needs_poll(
         self,
         service_info: BluetoothServiceInfoBleak,
@@ -379,9 +652,11 @@ class VerovalBleCoordinator(
         """Poll when HA is running, a connectable path exists, and the dump is due."""
         if self.hass.state is not CoreState.running:
             return False
-        if not self.device_data.poll_needed(
+        needed = self.device_data.poll_needed(
             service_info, last_poll, self.cuff_user
-        ):
+        )
+        self._ensure_grace_timer()
+        if not needed:
             return False
         if async_ble_device_from_address(
             self.hass, service_info.device.address, connectable=True
@@ -467,6 +742,8 @@ class VerovalBleCoordinator(
         """Track RSSI from advertisements; never log them at INFO."""
         self.rssi = service_info.rssi
         super()._async_handle_bluetooth_event(service_info, change)
+        self._ensure_grace_timer()
+        self.async_update_listeners()
 
 
 type VerovalBleConfigEntry = ConfigEntry[VerovalBleCoordinator]

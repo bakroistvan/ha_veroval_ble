@@ -35,7 +35,9 @@ from .bluez_pair import (
     is_bluez_pairing_supported,
     is_local_bluez_device,
 )
+from .advertisement import advertisement_is_live
 from .const import (
+    ADVERTISEMENT_MAX_AGE_SECONDS,
     CONF_CUFF_USER,
     CONF_PIN,
     DOMAIN,
@@ -47,10 +49,6 @@ from .parser import CUFF_USER_1, CUFF_USER_2
 
 _LOGGER = logging.getLogger(__name__)
 
-# HA's scanner cache can outlive BlueZ Device1 objects for unpaired devices.
-ADVERTISEMENT_MAX_AGE_SECONDS = 30.0
-
-
 def _is_bpu26(service_info: BluetoothServiceInfoBleak) -> bool:
     """Return True if this advertisement looks like a Veroval BPU26."""
     name = service_info.name or ""
@@ -61,11 +59,11 @@ def _is_bpu26(service_info: BluetoothServiceInfoBleak) -> bool:
 
 def _is_fresh_advertisement(service_info: BluetoothServiceInfoBleak) -> bool:
     """Return True if this advertisement is recent enough that BlueZ may still know it."""
-    ad_time = getattr(service_info, "time", None)
-    if not isinstance(ad_time, (int, float)):
-        return False
-    age = time.monotonic() - ad_time
-    return 0 <= age <= ADVERTISEMENT_MAX_AGE_SECONDS
+    return advertisement_is_live(
+        service_info,
+        max_age=ADVERTISEMENT_MAX_AGE_SECONDS,
+        require_timestamp=True,
+    )
 
 
 def _source_is_local_adapter(source: object) -> bool:
@@ -249,6 +247,12 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         if not _is_bpu26(discovery_info):
             return self.async_abort(reason="not_supported")
+        if not _is_fresh_advertisement(discovery_info):
+            _LOGGER.debug(
+                "Ignoring stale Bluetooth discovery for %s",
+                discovery_info.address,
+            )
+            return self.async_abort(reason="stale_advertisement")
 
         address = discovery_info.address.lower()
         configured = self._configured_slots(address)

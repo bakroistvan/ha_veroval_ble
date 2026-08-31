@@ -9,7 +9,7 @@ from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
 
 from .bluez_pair import async_unpair_address
-from .const import CONF_CUFF_USER, DOMAIN
+from .const import CONF_CUFF_USER, DOMAIN, normalize_ble_address
 from .coordinator import (
     VerovalBleConfigEntry,
     VerovalBleCoordinator,
@@ -61,7 +61,7 @@ def _device_data_for_address(
 
 async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -> bool:
     """Set up Veroval BLE from a config entry."""
-    address = _entry_address(entry)
+    address = normalize_ble_address(_entry_address(entry))
     cuff_user = int(entry.data[CONF_CUFF_USER])
     _LOGGER.info("Setting up BPU26 %s User %s", address, cuff_user)
 
@@ -79,7 +79,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -
         # Start after platforms have subscribed to coordinator updates.
         coordinator.async_start()
     )
-    await async_setup_services(hass)
+    entry.async_on_unload(coordinator.async_start_bluez_rssi_watch())
+    async_setup_services(hass)
     return True
 
 

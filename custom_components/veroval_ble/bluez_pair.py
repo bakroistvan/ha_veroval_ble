@@ -251,6 +251,27 @@ def _adapter_path_for_device(device_path: str) -> str:
     return device_path.rsplit("/", 1)[0]
 
 
+def rssi_from_device_props(props: dict[str, Any]) -> int | None:
+    """Return Device1 RSSI if BlueZ is currently receiving advertisements.
+
+    RSSI is absent from Device1 while the cuff is asleep (cached Name /
+    ManufacturerData remain). Presence is a live radio sighting even when
+    Home Assistant's scanner does not emit BluetoothServiceInfoBleak.
+    RSSI is also usually absent while Connected is true (GATT link up).
+    """
+    if "RSSI" not in props:
+        return None
+    raw = _dbus_plain(props["RSSI"])
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return int(raw)
+
+
+def connected_from_device_props(props: dict[str, Any]) -> bool:
+    """Return Device1 Connected (host adapter GATT link), matching bluetoothctl."""
+    return _dbus_bool(props.get("Connected"))
+
+
 def _dbus_bool(value: Any, default: bool = False) -> bool:
     """Unwrap a dbus-fast Variant or Python bool."""
     if value is None:
@@ -339,6 +360,75 @@ async def async_start_host_adapter_discovery() -> Any:
                     _LOGGER.debug("D-Bus disconnect after discovery failed: %s", err)
 
     return _stop
+
+
+async def _radio_for_address(
+    bus: Any, address: str
+) -> tuple[int | None, bool] | None:
+    """Return (RSSI or None, Connected) for *address*, or None if no Device1."""
+    objects = await _get_managed_objects(bus)
+    target = address.lower()
+    for _path, interfaces in objects.items():
+        device = interfaces.get(DEVICE_INTERFACE)
+        if not device:
+            continue
+        address_variant = device.get("Address")
+        if address_variant is None:
+            continue
+        addr = getattr(address_variant, "value", address_variant)
+        if str(addr).lower() != target:
+            continue
+        return rssi_from_device_props(device), connected_from_device_props(device)
+    return None
+
+
+async def async_watch_device_rssi(
+    address: str,
+    on_rssi: Any,
+    interval: float,
+    on_connected: Any = None,
+) -> None:
+    """Call *on_rssi* / *on_connected* from BlueZ Device1 for *address*.
+
+    RSSI is present while the cuff is advertising and not connected.
+    Connected matches ``bluetoothctl info`` ``Connected: yes/no``.
+    Runs until cancelled. No-op when this host cannot talk to BlueZ.
+    """
+    if not is_bluez_pairing_supported():
+        return
+    try:
+        from dbus_fast.aio import MessageBus
+        from dbus_fast.constants import BusType
+    except ImportError:
+        return
+
+    while True:
+        bus = None
+        try:
+            bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+            while True:
+                radio = await _radio_for_address(bus, address)
+                if radio is None:
+                    if on_connected is not None:
+                        on_connected(False)
+                else:
+                    rssi, connected = radio
+                    if rssi is not None:
+                        on_rssi(rssi)
+                    if on_connected is not None:
+                        on_connected(connected)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("BlueZ radio watch for %s failed: %s", address, err)
+            await asyncio.sleep(interval)
+        finally:
+            if bus is not None:
+                try:
+                    bus.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 async def _find_device_path_on_bus(bus: Any, address: str) -> str | None:

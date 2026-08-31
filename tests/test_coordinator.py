@@ -65,8 +65,18 @@ def _stub_homeassistant() -> None:
         def __init__(self, hass: object, logger: object, **kwargs: object) -> None:
             self.hass = hass
             self.logger = logger
+            self._available = False
+
+        @property
+        def available(self) -> bool:
+            return self._available
 
         def _async_handle_unavailable(self, service_info: object) -> None:
+            return None
+
+        def _async_handle_bluetooth_event(
+            self, service_info: object, change: object
+        ) -> None:
             return None
 
         def async_set_updated_data(self, data: object) -> None:
@@ -137,6 +147,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
 
 _const, _parser, _coordinator = _load_coordinator()
 AD_SILENCE_NEW_WINDOW_SECONDS = _const.AD_SILENCE_NEW_WINDOW_SECONDS
+CUFF_ADVERTISE_SECONDS = _const.CUFF_ADVERTISE_SECONDS
 PHONE_GRACE_SECONDS = _const.PHONE_GRACE_SECONDS
 POLL_WINDOW_GAP_SECONDS = _const.POLL_WINDOW_GAP_SECONDS
 VerovalBleDeviceData = _coordinator.VerovalBleDeviceData
@@ -423,6 +434,26 @@ def test_coordinator_force_poll_updates_data() -> None:
     assert coordinator.data is result.selected
 
 
+def test_is_advertising_follows_last_live_ad_not_available() -> None:
+    """HA available stays true on cached ads; the sensor must not."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    coordinator = _make_coordinator(data)
+    coordinator._available = True
+    assert coordinator.is_advertising is False
+
+    live = SimpleNamespace(time=0.0)
+    assert data.poll_needed(live, None) is False
+    assert coordinator.is_advertising is True
+
+    clock.now = CUFF_ADVERTISE_SECONDS - 1
+    coordinator._available = True
+    assert coordinator.is_advertising is True
+    clock.now = CUFF_ADVERTISE_SECONDS
+    coordinator._available = True
+    assert coordinator.is_advertising is False
+
+
 def test_first_poll_needed_starts_phone_grace() -> None:
     clock = _FakeClock(100.0)
     data = VerovalBleDeviceData(monotonic=clock)
@@ -546,7 +577,8 @@ def test_silence_during_grace_does_not_open_new_window() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     assert data.poll_needed(object(), None) is False
     started = data._grace_started_at
-    clock.now = AD_SILENCE_NEW_WINDOW_SECONDS + 5
+    # Past a typical scanner gap, still inside phone grace (dump must not start).
+    clock.now = PHONE_GRACE_SECONDS - 1
     assert data.poll_needed(object(), None) is False
     assert data._grace_started_at == started
     assert data._window_skipped is False
@@ -684,3 +716,189 @@ def test_missing_characteristic_does_not_set_last_synchronized() -> None:
 
     asyncio.run(run())
     assert data.last_synchronized == {}
+
+
+def test_stale_cached_ad_does_not_refresh_last_ad_time() -> None:
+    """HA can keep delivering the last packet after the cuff sleeps."""
+    clock = _FakeClock(100.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    live = SimpleNamespace(time=100.0)
+    assert data.poll_needed(live, None) is False
+    assert data._last_ad_time == 100.0
+    assert data._last_ad_stamp == 100.0
+
+    clock.now = 110.0
+    stale = SimpleNamespace(time=50.0)
+    assert data.poll_needed(stale, None) is False
+    assert data._last_ad_time == 100.0
+    assert data._grace_started_at == 100.0
+
+    clock.now = 100.0 + CUFF_ADVERTISE_SECONDS - 1
+    assert data.is_advertising() is True
+    clock.now = 100.0 + CUFF_ADVERTISE_SECONDS
+    assert data.is_advertising() is False
+
+
+def test_replayed_same_stamp_is_not_live() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    first = SimpleNamespace(time=0.0)
+    assert data.poll_needed(first, None) is False
+    clock.now = 5.0
+    replay = SimpleNamespace(time=0.0)
+    assert data.poll_needed(replay, None) is False
+    assert data._last_ad_time == 0.0
+
+
+def test_cached_ads_after_dump_do_not_block_next_window() -> None:
+    """Issue #23: scanner cache must not mute the next real measurement."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+    data._last_ad_time = 0.0
+    data._last_ad_stamp = 0.0
+    assert data._polled_this_window is True
+
+    for now in (10.0, 30.0, 90.0, 150.0):
+        clock.now = now
+        cached = SimpleNamespace(time=0.0)
+        assert data.poll_needed(cached, None, 1) is False
+        assert data._polled_this_window is True
+
+    clock.now = 200.0
+    fresh = SimpleNamespace(time=200.0)
+    assert data.poll_needed(fresh, None, 1) is False
+    assert data._grace_started_at == 200.0
+    clock.now = 200.0 + PHONE_GRACE_SECONDS
+    later = SimpleNamespace(time=clock.now)
+    assert data.poll_needed(later, None, 1) is True
+
+
+def test_grace_dump_due_without_second_advertisement() -> None:
+    """HA often sends only one live callback for the whole flash."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    assert data.poll_needed(SimpleNamespace(time=0.0), None) is False
+    assert data.grace_dump_due() is False
+    clock.now = PHONE_GRACE_SECONDS - 1
+    assert data.grace_dump_due() is False
+    clock.now = PHONE_GRACE_SECONDS
+    assert data.grace_dump_due() is True
+    assert data._polled_this_window is False
+
+
+def test_grace_timer_polls_without_second_ad() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    scheduled: list[tuple[float, object]] = []
+
+    class _Handle:
+        def cancel(self) -> None:
+            return None
+
+    def call_later(delay: float, callback: object) -> _Handle:
+        scheduled.append((delay, callback))
+        return _Handle()
+
+    tasks: list[object] = []
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(
+        loop=SimpleNamespace(call_later=call_later),
+        state=_coordinator.CoreState.running,
+        async_create_task=lambda coro: tasks.append(coro),
+    )
+
+    assert data.poll_needed(SimpleNamespace(time=0.0), None) is False
+    coordinator._ensure_grace_timer()
+    assert scheduled == [(PHONE_GRACE_SECONDS, coordinator._async_grace_timer_fired)]
+
+    dumps = {"n": 0}
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        dumps["n"] += 1
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    _coordinator.async_ble_device_from_address = (
+        lambda *args, **kwargs: _FakeBleDevice()
+    )
+
+    clock.now = PHONE_GRACE_SECONDS
+    coordinator._async_grace_timer_fired()
+    assert tasks
+    asyncio.run(tasks[0])
+    assert dumps["n"] == 1
+    assert data._polled_this_window is True
+
+
+def test_coordinator_registers_uppercase_address() -> None:
+    data = VerovalBleDeviceData()
+    coordinator = VerovalBleCoordinator(
+        hass=SimpleNamespace(),
+        address="aa:bb:cc:dd:ee:ff",
+        cuff_user=1,
+        device_data=data,
+    )
+    assert coordinator.address == "AA:BB:CC:DD:EE:FF"
+
+
+def test_bluez_rssi_after_idle_starts_advertising() -> None:
+    """HA cache replay is not live; BlueZ Device1 RSSI is."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+    data._last_ad_time = 0.0
+    data._last_ad_stamp = 0.0
+    clock.now = 10_000.0
+    assert data.poll_needed(SimpleNamespace(time=0.0), None, 1) is False
+    assert data.is_advertising() is False
+
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    coordinator.async_handle_bluez_rssi(-54)
+    assert coordinator.rssi == -54
+    assert coordinator.is_advertising is True
+    assert data._grace_started_at == 10_000.0
+
+
+def test_bluez_connected_sets_is_connected() -> None:
+    data = VerovalBleDeviceData()
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    assert coordinator.is_connected is False
+    coordinator.async_handle_bluez_connected(True)
+    assert data.bluez_connected is True
+    assert coordinator.is_connected is True
+    coordinator.async_handle_bluez_connected(False)
+    assert coordinator.is_connected is False
+
+
+def test_is_connected_while_poll_lock_held() -> None:
+    data = VerovalBleDeviceData()
+    coordinator = _make_coordinator(data)
+    assert coordinator.is_connected is False
+
+    async def run() -> None:
+        async with data._poll_lock:
+            assert data.is_connected is True
+            assert coordinator.is_connected is True
+
+    asyncio.run(run())
+    assert coordinator.is_connected is False
+
+
+def test_bluez_rssi_watch_is_noop_without_create_task() -> None:
+    coordinator = _make_coordinator(VerovalBleDeviceData())
+    coordinator.hass = SimpleNamespace()
+    stop = coordinator.async_start_bluez_rssi_watch()
+    stop()
