@@ -20,5 +20,5 @@
   "issue_tracker": "https://github.com/bakroistvan/ha_veroval_ble/issues",
   "loggers": ["custom_components.veroval_ble"],
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

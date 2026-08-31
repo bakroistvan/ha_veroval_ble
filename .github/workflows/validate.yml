@@ -29,6 +29,3 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          # LICENSE is on this branch but not yet on default (main). GitHub SPDX
-          # is detected from the default branch only — drop this after merge.
-          ignore: license

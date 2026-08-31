@@ -8,9 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-31
+
 ### Added
 
-- HACS Action no longer ignores description/topics; brand icon is tracked for store validation.
+- HACS Action validates with zero ignores (description, topics, license); brand icon tracked for store validation.
 - 20-second phone-first grace so medi.connect can take the cuff before Home Assistant connects. Unavailable during the wait skips that window.
 - New advertise window after idle unavailable or 20s advertisement silence (no 180s mute after setup). Fixes subsequent-measurement skip.
 - Developer action `veroval_ble.force_dump` to sync immediately, including during grace.
@@ -33,4 +35,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sensors: systolic, diastolic, pulse, measured time, user slot; irregular-pulse binary sensor.
 - HIL dump script and unit tests for parser, client, coordinator, and config flow.
 
+[0.2.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.2.0
 [0.1.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.1.0
