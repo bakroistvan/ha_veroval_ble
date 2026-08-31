@@ -29,8 +29,6 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
-          # GitHub API metadata — not files in git. Remove these ignores after:
-          # - Settings → description is set
-          # - Settings → topics include hacs, home-assistant, …
-          # - this LICENSE is on the default branch (GitHub then reports SPDX MIT)
-          ignore: description topics license
+          # LICENSE is on this branch but not yet on default (main). GitHub SPDX
+          # is detected from the default branch only — drop this after merge.
+          ignore: license

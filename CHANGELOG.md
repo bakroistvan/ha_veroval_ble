@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- HACS Action no longer ignores description/topics; brand icon is tracked for store validation.
 - 20-second phone-first grace so medi.connect can take the cuff before Home Assistant connects. Unavailable during the wait skips that window.
 - New advertise window after idle unavailable or 20s advertisement silence (no 180s mute after setup). Fixes subsequent-measurement skip.
 - Developer action `veroval_ble.force_dump` to sync immediately, including during grace.
