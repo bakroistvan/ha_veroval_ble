@@ -7,7 +7,7 @@
 
 Home Assistant custom integration for the **Veroval compact+ BPU 26** blood pressure cuff (BLE name `BPU26`). Domain: `veroval_ble`.
 
-It pairs on the **Home Assistant host Bluetooth adapter**, drains the cuff history dump, and publishes the newest reading for the selected **User 1** or **User 2** slot.
+It pairs on the **Home Assistant host Bluetooth adapter**, drains the cuff history dump, and publishes the newest reading for **User 1 and User 2** on a single Home Assistant device.
 
 **Not for diagnosis, treatment, or medical decision-making.** Readings are for personal tracking only.
 
@@ -56,7 +56,6 @@ The cuff shows a **6-digit PIN** during Bluetooth pairing (SMP Passkey Entry). S
 2. Press **User 1** or **User 2** so Bluetooth flashes.
 3. Add **Veroval Blood Pressure BLE** (or open the discovery card).
 4. When prompted, enter the **6-digit PIN** shown on the cuff.
-5. Choose **User 1** or **User 2** for this config entry.
 
 **ESPHome Bluetooth Proxy cannot pair this cuff** (no way to enter the PIN on the proxy radio). Use the HAOS host adapter.
 
@@ -76,28 +75,29 @@ Then run setup again (already-paired cuffs skip the PIN step).
 1. Press **User 1** or **User 2** so the cuff advertises.
 2. **Settings → Devices & services** — Home Assistant should discover **Veroval Blood Pressure BLE**, or add it manually and scan.
 3. Enter the cuff PIN when the UI asks (host adapter only).
-4. Select **User 1** or **User 2** — the slot whose latest reading this config entry will publish.
 
-Sensors belong to **that slot only**. A second person can add the same cuff again and choose the other user (already paired — no PIN again). Each slot is a **separate Home Assistant device** (`BPU26 User 1` / `BPU26 User 2`). If an older version merged both slots into one device, delete that device and reload the integration.
+Sensors for **User 1** and **User 2** belong to **one Home Assistant device** (`BPU26`). Pair once; do not add the cuff a second time for the other person.
 
-Each sync **drains** the BLE history dump, then publishes the record with the **newest timestamp for the selected slot** — not the first packet.
+Each sync **drains** the BLE history dump, then publishes the newest timestamp for **each** slot — not the first packet.
 
 After the cuff starts advertising, Home Assistant **waits 20 seconds** before connecting so **medi.connect** can take the transfer first. If the Bluetooth symbol goes out during that wait (the phone connected), Home Assistant skips that window. Pairing still needs a single bond — unpair the phone during setup. This wait does not keep both the phone and Home Assistant paired at once. A later advertise window (new measurement) starts the same 20-second wait; **Force data sync** (`veroval_ble.force_dump`) connects immediately.
 
-**Delete:** Removing the **last** Veroval device for a cuff also removes the host Bluetooth bond. Deleting only one of two user slots (User 1 or User 2) leaves the bond so the other slot keeps working.
+**Delete:** Removing the Veroval device also removes the host Bluetooth bond.
+
+**Upgrade from 0.2.0:** reload the integration. The two per-slot config entries become one cuff entry. Leftover empty `BPU26 User 2` devices can be deleted if Home Assistant did not merge them. Diagnostic entity ids for Connected / RSSI may change (`…_1_connected` → `…_connected`). Measurement unique ids stay `{mac}_{user}_{sensor}`.
 
 ## Sensors
 
 | Entity | Notes |
 |--------|--------|
-| Systolic | mmHg |
-| Diastolic | mmHg |
-| Pulse | bpm |
-| Measured time | Cuff timestamp of the published reading |
-| Last synchronized | Home Assistant time of the last successful dump for this slot |
+| Systolic (User 1 / User 2) | mmHg |
+| Diastolic (User 1 / User 2) | mmHg |
+| Pulse (User 1 / User 2) | bpm |
+| Measured time (User 1 / User 2) | Cuff timestamp of the published reading |
+| Last synchronized (User 1 / User 2) | Home Assistant time of the last successful dump for that slot |
 | Connected | Diagnostic: **on** while the Home Assistant host Bluetooth adapter has a GATT link to the cuff (`bluetoothctl` **Connected: yes**), **off** when the cuff is asleep or only advertising. |
-| User slot | Label **User 1** / **User 2** |
-| Irregular pulse | Binary sensor (not atrial fibrillation) |
+| Irregular pulse (User 1 / User 2) | Binary sensor (not atrial fibrillation) |
+| Force data sync | Button on the device page: connect now and drain both slots, ignoring the 20-second phone-first grace |
 
 There is **no battery** entity (the cuff does not expose one).
 
@@ -135,7 +135,7 @@ See **[docs/DEBUG.md](docs/DEBUG.md)** for debug logging (UI, YAML, and `logger.
 
 Typical causes: advertise window expired (press User 1/2 again), host not paired/trusted, medi.connect or a phone still bonded, or Bluetooth Proxy used instead of the host adapter.
 
-To force a dump while Bluetooth is flashing: **Developer tools → Actions → Veroval Blood Pressure BLE: Force data sync** (`veroval_ble.force_dump`). See **[docs/DEBUG.md](docs/DEBUG.md)**.
+To force a dump while Bluetooth is flashing: open the **BPU26** device and press **Force data sync**, or use **Developer tools → Actions → Veroval Blood Pressure BLE: Force data sync** (`veroval_ble.force_dump`). See **[docs/DEBUG.md](docs/DEBUG.md)**.
 
 ## Protocol and captures
 

@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-02
+
+### Added
+
+- **Force data sync** button on the BPU26 device page (same GATT dump as `veroval_ble.force_dump`).
+
+### Changed
+
+- One Home Assistant device and one config entry per cuff. User 1 and User 2 readings are named entities on that device (`Systolic (User 1)`, …).
+- One GATT dump publishes both memory slots. Setup no longer asks which user to add.
+- `force_dump` targets the cuff, not a user slot.
+
+### Breaking
+
+- Upgrading from 0.2.0 migrates `{mac}_1` / `{mac}_2` config entries into one `{mac}` entry. Area assignments on leftover slot devices may need a one-time cleanup.
+- Connected and RSSI unique ids are now `{mac}_connected` / `{mac}_rssi` (no `_1` / `_2` suffix).
+- The User slot diagnostic sensor is removed (the user is in the entity name).
+
 ## [0.2.0] - 2026-08-31
 
 ### Added
@@ -35,5 +53,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sensors: systolic, diastolic, pulse, measured time, user slot; irregular-pulse binary sensor.
 - HIL dump script and unit tests for parser, client, coordinator, and config flow.
 
+[0.3.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.3.0
 [0.2.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.2.0
 [0.1.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.1.0

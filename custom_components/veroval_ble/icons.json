@@ -3,5 +3,12 @@
     "force_dump": {
       "service": "mdi:bluetooth-connect"
     }
+  },
+  "entity": {
+    "button": {
+      "force_dump": {
+        "default": "mdi:sync"
+      }
+    }
   }
 }

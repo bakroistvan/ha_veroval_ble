@@ -87,10 +87,13 @@ EntityDescription = sys.modules["homeassistant.helpers.entity"].EntityDescriptio
 DOMAIN = sys.modules[f"{_PKG}.const"].DOMAIN
 
 
-def _device_info(address: str, cuff_user: int) -> dict:
-    coordinator = SimpleNamespace(address=address, cuff_user=cuff_user)
-    entity = VerovalBleEntity(coordinator, EntityDescription("systolic"))
-    return entity._attr_device_info
+def _entity_for(address: str, cuff_user: int | None, key: str = "systolic"):
+    coordinator = SimpleNamespace(address=address)
+    return VerovalBleEntity(coordinator, EntityDescription(key), cuff_user)
+
+
+def _device_info(address: str, cuff_user: int | None = 1) -> dict:
+    return _entity_for(address, cuff_user)._attr_device_info
 
 
 def _connection_values(device_info: dict) -> set[str]:
@@ -98,26 +101,42 @@ def _connection_values(device_info: dict) -> set[str]:
     return {value for _kind, value in connections}
 
 
-def test_device_info_identifiers_include_cuff_user_slot() -> None:
+def test_device_info_is_one_cuff_device() -> None:
     address = "AA:BB:CC:DD:EE:FF"
     info = _device_info(address, cuff_user=1)
-    assert info["identifiers"] == {(DOMAIN, f"{address.lower()}_1")}
-    assert info["name"] == "BPU26 User 1"
+    assert info["identifiers"] == {(DOMAIN, address.lower())}
+    assert info["name"] == "BPU26"
+    assert (_CONNECTION_BLUETOOTH, address.lower()) in info["connections"]
 
 
-def test_device_info_connections_do_not_include_bluetooth_mac() -> None:
+def test_device_info_connections_include_bluetooth_mac() -> None:
     address = "AA:BB:CC:DD:EE:FF"
     info = _device_info(address, cuff_user=2)
-    assert (_CONNECTION_BLUETOOTH, address) not in (info.get("connections") or set())
-    assert address not in _connection_values(info)
+    assert address.lower() in _connection_values(info)
 
 
-def test_user_slots_use_distinct_identifiers_so_registry_does_not_merge() -> None:
+def test_user_slots_share_device_identifiers() -> None:
     address = "AA:BB:CC:DD:EE:FF"
     user1 = _device_info(address, cuff_user=1)
     user2 = _device_info(address, cuff_user=2)
-    assert user1["identifiers"] != user2["identifiers"]
-    assert user1["identifiers"] == {(DOMAIN, f"{address.lower()}_1")}
-    assert user2["identifiers"] == {(DOMAIN, f"{address.lower()}_2")}
+    assert user1["identifiers"] == user2["identifiers"] == {(DOMAIN, address.lower())}
     shared_connections = _connection_values(user1) & _connection_values(user2)
-    assert address not in shared_connections
+    assert address.lower() in shared_connections
+
+
+def test_measurement_unique_ids_keep_cuff_user() -> None:
+    address = "AA:BB:CC:DD:EE:FF"
+    user1 = _entity_for(address, 1, "systolic")
+    user2 = _entity_for(address, 2, "systolic")
+    assert user1._attr_unique_id == "aa:bb:cc:dd:ee:ff_1_systolic"
+    assert user2._attr_unique_id == "aa:bb:cc:dd:ee:ff_2_systolic"
+    assert user1._attr_translation_placeholders == {"user": "1"}
+    assert user2._attr_translation_placeholders == {"user": "2"}
+
+
+def test_device_level_unique_id_omits_cuff_user() -> None:
+    entity = _entity_for("AA:BB:CC:DD:EE:FF", None, "connected")
+    assert entity._attr_unique_id == "aa:bb:cc:dd:ee:ff_connected"
+    assert not hasattr(entity, "_attr_translation_placeholders") or not getattr(
+        entity, "_attr_translation_placeholders", None
+    )

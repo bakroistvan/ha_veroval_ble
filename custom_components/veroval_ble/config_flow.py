@@ -38,14 +38,12 @@ from .bluez_pair import (
 from .advertisement import advertisement_is_live
 from .const import (
     ADVERTISEMENT_MAX_AGE_SECONDS,
-    CONF_CUFF_USER,
     CONF_PIN,
     DOMAIN,
     LOCAL_NAME,
     MANUFACTURER_ID,
     SCAN_TIMEOUT_SECONDS,
 )
-from .parser import CUFF_USER_1, CUFF_USER_2
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,22 +117,11 @@ def _normalize_address(value: str) -> str | None:
 class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Veroval BLE.
 
-    Each cuff user slot is a separate config entry whose unique_id is
-    ``{address}_{cuff_user}`` (for example ``aa:bb:cc:dd:ee:ff_1``). That
-    scheme lets User 1 and User 2 coexist.
-
-    Bluetooth discovery uses the bare MAC only as a temporary flow id so
-    two in-progress discoveries for the same cuff are de-duplicated. The
-    MAC is never the created entry unique_id, so
-    ``_abort_if_unique_id_configured()`` must not run while unique_id is
-    still the MAC when a slot already exists (an Ignore entry keyed by
-    MAC would block adding User 2). When both slots are already
-    configured, discovery binds unique_id to an existing
-    ``{address}_{cuff_user}`` entry instead, so Home Assistant treats the
-    advertisement as already handled.
+    One config entry per cuff. Unique id is the BLE MAC. Both User 1 and
+    User 2 memory slots are published on that single Home Assistant device.
     """
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -152,34 +139,26 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         self._pair_error_detail: str | None = None
         self._not_found_error: str | None = None
 
-    def _configured_slots(self, address: str) -> set[int]:
-        """Return cuff-user slots already set up for this BLE address.
-
-        Ignore entries (no ``cuff_user``) are skipped so a first-time Ignore
-        keyed by MAC is not treated as a configured slot.
-        """
-        slots: set[int] = set()
-        target = address.lower()
+    def _configured_addresses(self) -> set[str]:
+        """Return BLE addresses that already have a config entry or Ignore."""
+        addresses: set[str] = set()
         for entry in self._async_current_entries():
             entry_address = entry.data.get(CONF_ADDRESS)
-            if not entry_address and entry.unique_id:
-                entry_address = entry.unique_id.rsplit("_", 1)[0]
-            if not entry_address or str(entry_address).lower() != target:
+            if entry_address:
+                addresses.add(str(entry_address).lower())
+            unique_id = entry.unique_id
+            if not unique_id:
                 continue
-            cuff_user = entry.data.get(CONF_CUFF_USER)
-            if cuff_user is None:
-                continue
-            slots.add(int(cuff_user))
-        return slots
+            lowered = unique_id.lower()
+            if lowered.endswith("_1") or lowered.endswith("_2"):
+                addresses.add(lowered.rsplit("_", 1)[0])
+            else:
+                addresses.add(lowered)
+        return addresses
 
-    def _available_slots(self, address: str) -> dict[int, str]:
-        """Return User 1/2 options that are not already configured."""
-        configured = self._configured_slots(address)
-        return {
-            slot: f"User {slot}"
-            for slot in (CUFF_USER_1, CUFF_USER_2)
-            if slot not in configured
-        }
+    def _is_address_configured(self, address: str) -> bool:
+        """Return True if this cuff MAC is already set up."""
+        return address.lower() in self._configured_addresses()
 
     def _resolve_local_device_path(self) -> str | None:
         """Return a local BlueZ object path for the selected address, if any."""
@@ -234,11 +213,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle Bluetooth discovery: confirm the BPU26.
 
-        When both user slots exist, bind unique_id to ``{address}_1`` (an
-        existing entry) and abort so Home Assistant treats rediscovery as
-        already handled. Do not set unique_id to the bare MAC in that
-        case — MAC never matches ``address_cuff_user`` entries, so HA
-        would start a new aborting flow on every advertisement.
+        Unique id is the cuff MAC. An existing entry or Ignore for that
+        MAC aborts rediscovery.
         """
         _LOGGER.debug(
             "Bluetooth discovery %s (%s)",
@@ -255,18 +231,10 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="stale_advertisement")
 
         address = discovery_info.address.lower()
-        configured = self._configured_slots(address)
-        if configured >= {CUFF_USER_1, CUFF_USER_2}:
-            await self.async_set_unique_id(f"{address}_{CUFF_USER_1}")
-            self._abort_if_unique_id_configured()
-            return self.async_abort(reason="already_configured")
-
-        # Temporary flow id. Do not abort-if-configured after MAC when a
-        # slot already exists: an Ignore entry keyed by MAC would block
-        # User 2. With zero slots, honor a first-time Ignore.
         await self.async_set_unique_id(address)
-        if not configured:
-            self._abort_if_unique_id_configured()
+        self._abort_if_unique_id_configured()
+        if self._is_address_configured(address):
+            return self.async_abort(reason="already_configured")
 
         self._discovery_info = discovery_info
         self._address = address
@@ -347,7 +315,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             if not _is_bpu26(discovery_info):
                 continue
             address = discovery_info.address.lower()
-            if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+            if self._is_address_configured(address):
                 continue
             if not _is_host_adapter_advertisement(discovery_info):
                 if _is_proxy_advertisement(discovery_info) and address not in self._discovered_devices:
@@ -361,28 +329,20 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             self._proxy_devices.pop(address, None)
 
     def _discovered_titles(self) -> dict[str, str]:
-        """Return address → label for cuffs that still have a free user slot."""
-        current_full = {
-            entry.unique_id
-            for entry in self._async_current_entries()
-            if entry.unique_id
-        }
+        """Return address → label for cuffs that are not already configured."""
+        configured = self._configured_addresses()
         return {
             address: f"{info.name or LOCAL_NAME} ({address})"
             for address, info in self._discovered_devices.items()
-            if not (
-                f"{address}_{CUFF_USER_1}" in current_full
-                and f"{address}_{CUFF_USER_2}" in current_full
-            )
+            if address not in configured
         }
 
     async def _async_choose_address(self, address: str) -> ConfigFlowResult:
         """Continue setup for a discovered or typed BLE address.
 
-        If both user slots are taken, abort without setting unique_id to
-        the bare MAC (that id never matches ``address_cuff_user`` entries).
+        If this cuff is already set up, abort without changing unique_id.
         """
-        if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+        if self._is_address_configured(address):
             return self.async_abort(reason="already_configured")
         discovery = self._discovered_devices.get(address)
         if discovery is None:
@@ -444,7 +404,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._proxy_devices[service_info.address.lower()] = service_info
                 return
             address = service_info.address.lower()
-            if self._configured_slots(address) >= {CUFF_USER_1, CUFF_USER_2}:
+            if self._is_address_configured(address):
                 return
             self._discovered_devices[address] = service_info
             self._proxy_devices.pop(address, None)
@@ -637,8 +597,8 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if session.already_paired:
             await self._async_close_pair_session()
-            _LOGGER.debug("Already paired; continuing to user slot")
-            return await self.async_step_user_slot()
+            _LOGGER.debug("Already paired; creating config entry")
+            return await self._async_finish_setup()
 
         return await self.async_step_pair_wait()
 
@@ -701,13 +661,13 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_pair_wait_done(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Route after connecting: PIN form, user slot, or error."""
+        """Route after connecting: PIN form, create entry, or error."""
         outcome = self._pair_outcome
         if outcome == "need_pin":
             return await self.async_step_enter_pin()
         if outcome in {"done", "already_paired"}:
             await self._async_close_pair_session()
-            return await self.async_step_user_slot()
+            return await self._async_finish_setup()
         reason = self._pair_error_reason or "pairing_failed"
         await self._async_close_pair_session()
         if reason == "pairing_failed":
@@ -828,7 +788,7 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Route after bonding finishes."""
         if self._pair_outcome == "done":
-            return await self.async_step_user_slot()
+            return await self._async_finish_setup()
         reason = self._pair_error_reason or "pairing_failed"
         if reason == "pairing_failed":
             return self._abort_pairing_failed()
@@ -840,47 +800,14 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
         )
         return self.async_abort(reason=reason)
 
-    async def async_step_user_slot(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Required User 1 or User 2 slot.
-
-        Entry unique_id is ``{address}_{cuff_user}``.
-        ``_abort_if_unique_id_configured()`` is valid only after unique_id
-        has been set to that slot id, never while it is still the bare
-        MAC (used as a temporary discovery flow id).
-        """
+    async def _async_finish_setup(self) -> ConfigFlowResult:
+        """Create one config entry for the cuff (both user slots)."""
         assert self._address is not None
         address = self._address
-        options = self._available_slots(address)
-        if not options:
-            return self.async_abort(reason="already_configured")
-
-        if user_input is not None:
-            cuff_user = int(user_input[CONF_CUFF_USER])
-            if cuff_user not in options:
-                return self.async_abort(reason="already_configured")
-            unique_id = f"{address}_{cuff_user}"
-            await self.async_set_unique_id(unique_id, raise_on_progress=False)
-            self._abort_if_unique_id_configured()
-            _LOGGER.debug(
-                "Creating entry unique_id=%s cuff_user=%s", unique_id, cuff_user
-            )
-            return self.async_create_entry(
-                title=f"BPU26 User {cuff_user}",
-                data={
-                    CONF_ADDRESS: address,
-                    CONF_CUFF_USER: cuff_user,
-                },
-            )
-
-        return self.async_show_form(
-            step_id="user_slot",
-            data_schema=vol.Schema(
-                {vol.Required(CONF_CUFF_USER): vol.In(options)}
-            ),
-            description_placeholders={
-                "name": self._name or LOCAL_NAME,
-                "address": address,
-            },
+        await self.async_set_unique_id(address, raise_on_progress=False)
+        self._abort_if_unique_id_configured()
+        _LOGGER.debug("Creating entry unique_id=%s", address)
+        return self.async_create_entry(
+            title=self._name or LOCAL_NAME,
+            data={CONF_ADDRESS: address},
         )

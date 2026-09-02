@@ -100,18 +100,22 @@ Typical Core lines:
 
 The 6-digit PIN is not written to the log.
 
-## Force a dump (debug action)
+## Force a dump
 
-When the cuff is advertising but Home Assistant did not connect, grab the measurement immediately:
+When the cuff is advertising but Home Assistant did not connect, grab both user slots immediately:
 
 1. Press **User 1** or **User 2** so Bluetooth flashes.
-2. **Developer tools → Actions**.
-3. Choose **Veroval Blood Pressure BLE: Force data sync** (`veroval_ble.force_dump`).
-4. Target the **BPU26 User 1** or **User 2** device (or leave the target empty to sync every configured slot).
-5. Turn on **See response** if you want the systolic / diastolic / pulse / timestamp in the result.
-6. **Perform action**.
+2. Open the **BPU26** device and press **Force data sync**.
 
-This ignores the advertise-window skip **and the 20-second phone-first grace** and starts a GATT dump now. If the cuff is not advertising, the action fails with *No connectable BPU26*. Look for `Force dump` / `Starting new advertise window (force dump)` in the log.
+The same dump is available as a Developer Tools action:
+
+1. **Developer tools → Actions**.
+2. Choose **Veroval Blood Pressure BLE: Force data sync** (`veroval_ble.force_dump`).
+3. Target the **BPU26** device (or leave the target empty to sync every configured cuff).
+4. Turn on **See response** if you want the systolic / diastolic / pulse / timestamp per user slot.
+5. **Perform action**.
+
+This ignores the advertise-window skip **and the 20-second phone-first grace** and starts a GATT dump now. If the cuff is not advertising, the button or action fails with *No connectable BPU26*. Look for `Force dump` / `Starting new advertise window (force dump)` in the log.
 
 ## Capture a measurement session
 
@@ -135,7 +139,7 @@ Typical coordinator lines:
 | Level | What you see |
 |-------|----------------|
 | **DEBUG** | Advertisement seen; phone-first grace start / elapsed / skip; new advertise window; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); `stop_notify` and disconnect; config-flow steps; BlueZ Device1 snapshot; agent PIN request (not the PIN value); pairing stage tracebacks |
-| **INFO** | Config entry setup (address and User 1/2); successful latest reading for that slot (systolic / diastolic / pulse / time, no raw hex); `Pair()` started; pair+trust succeeded |
+| **INFO** | Config entry setup (cuff address); successful latest reading per user slot (systolic / diastolic / pulse / time, no raw hex); `Pair()` started; pair+trust succeeded |
 | **WARNING** | Connect timeout, missing Blood Pressure Measurement characteristic, parse failure, pairing failures with the BlueZ error name and Device1 properties |
 | **ERROR** | Unexpected exceptions around a poll |
 

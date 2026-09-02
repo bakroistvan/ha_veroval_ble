@@ -56,6 +56,7 @@ def _stub_homeassistant() -> None:
         return kwargs
 
     device_registry.DeviceInfo = device_info
+    device_registry.CONNECTION_BLUETOOTH = "bluetooth"
 
     class EntityDescription:
         def __init__(self, key: str, **kwargs: object) -> None:
@@ -138,7 +139,6 @@ CONNECTED_DESCRIPTION = _binary.CONNECTED_DESCRIPTION
 def _sensor(*, connected: bool) -> VerovalBleConnectedSensor:
     coordinator = SimpleNamespace(
         address="AA:BB:CC:DD:EE:FF",
-        cuff_user=1,
         is_connected=connected,
         available=True,
     )
@@ -164,4 +164,4 @@ def test_connected_is_diagnostic() -> None:
     assert CONNECTED_DESCRIPTION.entity_category == "diagnostic"
     assert CONNECTED_DESCRIPTION.device_class == "connectivity"
     sensor = _sensor(connected=False)
-    assert sensor._attr_unique_id == "aa:bb:cc:dd:ee:ff_1_connected"
+    assert sensor._attr_unique_id == "aa:bb:cc:dd:ee:ff_connected"

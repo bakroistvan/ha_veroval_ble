@@ -194,11 +194,10 @@ def _patch_dump(records: list[BloodPressureMeasurement]) -> dict[str, int]:
     return calls
 
 
-def _make_coordinator(device_data: object, cuff_user: int) -> object:
+def _make_coordinator(device_data: object) -> object:
     return VerovalBleCoordinator(
         hass=SimpleNamespace(),
         address="AA:BB:CC:DD:EE:FF",
-        cuff_user=cuff_user,
         device_data=device_data,
     )
 
@@ -209,8 +208,8 @@ def test_dump_timeout_covers_full_two_user_stream() -> None:
     assert DUMP_IDLE_SECONDS == 2.0
 
 
-def test_two_coordinators_share_one_dump() -> None:
-    """User 1 dump with mixed records; User 2 selects locally without a second GATT."""
+def test_one_poll_publishes_both_user_slots() -> None:
+    """One GATT dump selects the newest record for User 1 and User 2."""
     stamp1 = datetime(2024, 6, 1, 10, 0, 0)
     stamp2 = datetime(2024, 6, 1, 10, 0, 5)
 
@@ -249,27 +248,22 @@ def test_two_coordinators_share_one_dump() -> None:
     )
     records = [user1_latest, user1_older, user2_latest, user2_older]
     calls = _patch_dump(records)
+    coord = _make_coordinator(data)
 
-    coord1 = _make_coordinator(data, CUFF_USER_1)
-    coord2 = _make_coordinator(data, CUFF_USER_2)
-    assert coord1.device_data is coord2.device_data is data
+    async def run() -> object:
+        return await data.async_poll(_FakeBleDevice())
 
-    async def run() -> tuple[object, object]:
-        first = await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
-        second = await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
-        return first, second
-
-    first, second = asyncio.run(run())
+    published = asyncio.run(run())
 
     assert calls["n"] == 1
-    assert first is user1_latest
-    assert second is user2_latest
-    assert coord1.last_measurement is user1_latest
-    assert coord2.last_measurement is user2_latest
+    assert published[CUFF_USER_1] is user1_latest
+    assert published[CUFF_USER_2] is user2_latest
+    assert coord.measurement_for(CUFF_USER_1) is user1_latest
+    assert coord.measurement_for(CUFF_USER_2) is user2_latest
     assert data.last_synchronized[CUFF_USER_1] == stamp1
     assert data.last_synchronized[CUFF_USER_2] == stamp2
-    assert coord1.last_synchronized == stamp1
-    assert coord2.last_synchronized == stamp2
+    assert coord.last_synchronized_for(CUFF_USER_1) == stamp1
+    assert coord.last_synchronized_for(CUFF_USER_2) == stamp2
 
 
 def test_truncated_dump_user_2_still_stamps_last_synchronized() -> None:
@@ -295,16 +289,14 @@ def test_truncated_dump_user_2_still_stamps_last_synchronized() -> None:
     )
     calls = _patch_dump([user1])
 
-    async def run() -> tuple[object, object]:
-        first = await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
-        second = await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
-        return first, second
+    async def run() -> object:
+        return await data.async_poll(_FakeBleDevice())
 
-    first, second = asyncio.run(run())
+    published = asyncio.run(run())
 
     assert calls["n"] == 1
-    assert first is user1
-    assert second is None
+    assert published[CUFF_USER_1] is user1
+    assert published[CUFF_USER_2] is None
     assert data.last_measurement.get(CUFF_USER_2) is None
     assert data.last_synchronized[CUFF_USER_1] == stamp1
     assert data.last_synchronized[CUFF_USER_2] == stamp2
@@ -325,10 +317,9 @@ def test_user_1_last_measurement_unchanged_after_user_2_poll() -> None:
     _patch_dump([user1, user2])
 
     async def run() -> None:
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
-        published = data.last_measurement[CUFF_USER_1]
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
-        assert data.last_measurement[CUFF_USER_1] is published is user1
+        published = await data.async_poll(_FakeBleDevice())
+        assert published[CUFF_USER_1] is user1
+        assert data.last_measurement[CUFF_USER_1] is user1
         assert data.last_measurement[CUFF_USER_2] is user2
 
     asyncio.run(run())
@@ -351,7 +342,7 @@ def test_poll_needed_two_arg_false_after_dump() -> None:
     assert data.poll_needed(object(), None) is False
 
 
-def test_poll_needed_cuff_user_2_true_after_user_1_consumed_dump() -> None:
+def test_poll_needed_false_after_one_dump_publishes_both_slots() -> None:
     data = VerovalBleDeviceData()
     user1 = _measurement(
         user_id=BLE_USER_1,
@@ -365,14 +356,12 @@ def test_poll_needed_cuff_user_2_true_after_user_1_consumed_dump() -> None:
     _patch_dump([user1, user2])
 
     async def run() -> None:
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+        await data.async_poll(_FakeBleDevice())
 
     asyncio.run(run())
-    assert CUFF_USER_1 in data._consumed_slots
-    assert CUFF_USER_2 not in data._consumed_slots
-    assert data.poll_needed(object(), None, CUFF_USER_2) is True
-    assert data.poll_needed(object(), None, cuff_user=CUFF_USER_2) is True
-    assert data.poll_needed(object(), None, CUFF_USER_1) is False
+    assert data._consumed_slots == {CUFF_USER_1, CUFF_USER_2}
+    assert data.poll_needed(object(), None) is False
+    assert data.poll_needed(object(), None, CUFF_USER_2) is False
 
 
 def test_mark_window_ended_keeps_shared_dump_cache() -> None:
@@ -389,33 +378,23 @@ def test_mark_window_ended_keeps_shared_dump_cache() -> None:
     calls = _patch_dump([user1, user2])
 
     async def run() -> object:
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+        first = await data.async_poll(_FakeBleDevice())
         data.mark_window_ended()
         assert data._window_records is not None
-        assert CUFF_USER_1 in data._consumed_slots
-        return await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
+        assert data._consumed_slots == {CUFF_USER_1, CUFF_USER_2}
+        second = await data.async_poll(_FakeBleDevice())
+        return first, second
 
-    second = asyncio.run(run())
+    first, second = asyncio.run(run())
     assert calls["n"] == 1
-    assert second is user2
+    assert first[CUFF_USER_2] is user2
+    assert second[CUFF_USER_2] is user2
 
 
-def test_needs_poll_passes_cuff_user() -> None:
+def test_needs_poll_does_not_require_cuff_user() -> None:
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
-    seen: list[int | None] = []
-    original = data.poll_needed
-
-    def tracking_poll_needed(
-        service_info: object,
-        last_poll: float | None,
-        cuff_user: int | None = None,
-    ) -> bool:
-        seen.append(cuff_user)
-        return original(service_info, last_poll, cuff_user)
-
-    data.poll_needed = tracking_poll_needed  # type: ignore[method-assign]
-    coord = _make_coordinator(data, CUFF_USER_2)
+    coord = _make_coordinator(data)
     coord.hass = SimpleNamespace(state=_coordinator.CoreState.running)
     previous = _coordinator.async_ble_device_from_address
     _coordinator.async_ble_device_from_address = lambda *args, **kwargs: object()
@@ -424,7 +403,6 @@ def test_needs_poll_passes_cuff_user() -> None:
         assert coord._async_needs_poll(service_info, None) is False
         clock.now = PHONE_GRACE_SECONDS
         assert coord._async_needs_poll(service_info, None) is True
-        assert seen == [CUFF_USER_2, CUFF_USER_2]
     finally:
         _coordinator.async_ble_device_from_address = previous
 
@@ -467,8 +445,7 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
     _coordinator.dump_latest = fake_dump
 
     async def run() -> object:
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
+        await data.async_poll(_FakeBleDevice())
         data.mark_window_ended()
         assert data._window_records is not None
         assert data.poll_needed(object(), None, CUFF_USER_1) is False
@@ -476,19 +453,19 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
         assert data._grace_started_at == 0.0
         clock.now = PHONE_GRACE_SECONDS
         assert data.poll_needed(object(), None, CUFF_USER_1) is True
-        return await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+        return await data.async_poll(_FakeBleDevice())
 
     published = asyncio.run(run())
     assert calls["n"] == 2
-    assert published is second_user1
+    assert published[CUFF_USER_1] is second_user1
     assert data.last_measurement[CUFF_USER_1] is second_user1
     assert data.last_measurement[CUFF_USER_2] is first_user2
     assert data._window_records == [second_user1]
-    assert data._consumed_slots == {CUFF_USER_1}
+    assert data._consumed_slots == {CUFF_USER_1, CUFF_USER_2}
 
 
-def test_idle_unavailable_user_2_still_consumes_cache() -> None:
-    """User 2 can still take the shared dump after idle unavailable."""
+def test_idle_unavailable_after_both_slots_starts_new_window() -> None:
+    """After both slots are published, the next ad starts phone grace."""
     data = VerovalBleDeviceData()
     user1 = _measurement(
         user_id=BLE_USER_1,
@@ -502,17 +479,17 @@ def test_idle_unavailable_user_2_still_consumes_cache() -> None:
     _patch_dump([user1, user2])
 
     async def run() -> None:
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
+        await data.async_poll(_FakeBleDevice())
 
     asyncio.run(run())
     data.mark_window_ended()
-    assert data.poll_needed(object(), None, CUFF_USER_2) is True
-    assert data._window_records is not None
-    assert CUFF_USER_1 in data._consumed_slots
+    assert data.poll_needed(object(), None) is False
+    assert data._grace_started_at is not None
+    assert data._window_records is None
 
 
-def test_shared_grace_user_2_does_not_restart_wait() -> None:
-    """User 1 and User 2 share one grace; after the dump, User 2 uses the cache."""
+def test_shared_grace_one_dump_publishes_both_slots() -> None:
+    """Phone grace is per cuff; one dump after grace publishes User 1 and User 2."""
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
     user1 = _measurement(
@@ -526,19 +503,19 @@ def test_shared_grace_user_2_does_not_restart_wait() -> None:
     )
     calls = _patch_dump([user1, user2])
 
-    assert data.poll_needed(object(), None, CUFF_USER_1) is False
+    assert data.poll_needed(object(), None) is False
     started = data._grace_started_at
-    assert data.poll_needed(object(), None, CUFF_USER_2) is False
+    assert data.poll_needed(object(), None) is False
     assert data._grace_started_at == started
 
     clock.now = PHONE_GRACE_SECONDS
-    assert data.poll_needed(object(), None, CUFF_USER_1) is True
+    assert data.poll_needed(object(), None) is True
 
     async def run() -> object:
-        await data.async_poll(_FakeBleDevice(), CUFF_USER_1)
-        assert data.poll_needed(object(), None, CUFF_USER_2) is True
-        return await data.async_poll(_FakeBleDevice(), CUFF_USER_2)
+        return await data.async_poll(_FakeBleDevice())
 
-    second = asyncio.run(run())
+    published = asyncio.run(run())
     assert calls["n"] == 1
-    assert second is user2
+    assert published[CUFF_USER_1] is user1
+    assert published[CUFF_USER_2] is user2
+    assert data.poll_needed(object(), None) is False

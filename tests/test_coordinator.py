@@ -190,7 +190,6 @@ def _make_coordinator(device_data: object) -> object:
     return VerovalBleCoordinator(
         hass=SimpleNamespace(),
         address="AA:BB:CC:DD:EE:FF",
-        cuff_user=1,
         device_data=device_data,
     )
 
@@ -430,8 +429,9 @@ def test_coordinator_force_poll_updates_data() -> None:
         return await coordinator.async_force_poll()
 
     published = asyncio.run(run())
-    assert published is result.selected
-    assert coordinator.data is result.selected
+    assert published[1] is result.selected
+    assert coordinator.data[1] is result.selected
+    assert coordinator.measurement_for(1) is result.selected
 
 
 def test_is_advertising_follows_last_live_ad_not_available() -> None:
@@ -630,7 +630,7 @@ def test_successful_dump_sets_last_synchronized() -> None:
     asyncio.run(run())
 
     assert data.last_synchronized[1] == stamp
-    assert _make_coordinator(data).last_synchronized == stamp
+    assert _make_coordinator(data).last_synchronized_for(1) == stamp
 
 
 def test_unchanged_cuff_timestamp_still_updates_last_synchronized() -> None:
@@ -841,7 +841,6 @@ def test_coordinator_registers_uppercase_address() -> None:
     coordinator = VerovalBleCoordinator(
         hass=SimpleNamespace(),
         address="aa:bb:cc:dd:ee:ff",
-        cuff_user=1,
         device_data=data,
     )
     assert coordinator.address == "AA:BB:CC:DD:EE:FF"

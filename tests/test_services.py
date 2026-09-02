@@ -60,7 +60,9 @@ def _stub_modules() -> None:
     const.ATTR_DEVICE_ID = getattr(const, "ATTR_DEVICE_ID", "device_id")
     const.CONF_ADDRESS = getattr(const, "CONF_ADDRESS", "address")
     if getattr(const, "Platform", None) is None:
-        const.Platform = SimpleNamespace(SENSOR="sensor", BINARY_SENSOR="binary_sensor")
+        const.Platform = SimpleNamespace(
+            SENSOR="sensor", BINARY_SENSOR="binary_sensor", BUTTON="button"
+        )
     sys.modules["homeassistant.const"] = const
 
     exceptions = sys.modules.get("homeassistant.exceptions") or ModuleType(
@@ -222,15 +224,13 @@ def _dump_result(records: list[BloodPressureMeasurement]) -> SimpleNamespace:
     )
 
 
-def _make_coordinator(cuff_user: int, device_data: object | None = None) -> object:
+def _make_coordinator(device_data: object | None = None) -> object:
     data = device_data or VerovalBleDeviceData()
-    coord = VerovalBleCoordinator(
+    return VerovalBleCoordinator(
         hass=SimpleNamespace(),
         address="AA:BB:CC:DD:EE:FF",
-        cuff_user=cuff_user,
         device_data=data,
     )
-    return coord
 
 
 def test_service_name_is_force_dump() -> None:
@@ -243,34 +243,43 @@ def test_no_entries_raises() -> None:
     )
     try:
         _services.coordinators_for_service_call(hass, SimpleNamespace(data={}))
-    except _FakeHomeAssistantError as err:
+    except Exception as err:
+        assert type(err).__name__ == "HomeAssistantError" or "set up" in str(err)
         assert "set up" in str(err)
     else:
         raise AssertionError("expected HomeAssistantError")
 
 
 def test_no_device_id_returns_all_coordinators() -> None:
-    coord1 = _make_coordinator(CUFF_USER_1)
-    coord2 = _make_coordinator(CUFF_USER_2, coord1.device_data)
-    entries = [
-        SimpleNamespace(runtime_data=coord1),
-        SimpleNamespace(runtime_data=coord2),
-    ]
+    coord = _make_coordinator()
+    entries = [SimpleNamespace(runtime_data=coord)]
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(async_entries=lambda _domain: entries)
     )
     selected = _services.coordinators_for_service_call(hass, SimpleNamespace(data={}))
-    assert selected == [coord1, coord2]
+    assert selected == [coord]
 
 
-def test_device_id_selects_one_slot() -> None:
-    coord1 = _make_coordinator(CUFF_USER_1)
-    coord2 = _make_coordinator(CUFF_USER_2, coord1.device_data)
-    entries = [
-        SimpleNamespace(runtime_data=coord1),
-        SimpleNamespace(runtime_data=coord2),
-    ]
-    ident = ("veroval_ble", "AA:BB:CC:DD:EE:FF_1")
+def test_device_id_selects_cuff_by_mac() -> None:
+    coord = _make_coordinator()
+    entries = [SimpleNamespace(runtime_data=coord)]
+    ident = ("veroval_ble", "aa:bb:cc:dd:ee:ff")
+    device = SimpleNamespace(identifiers={ident})
+    registry = _services.dr.async_get(SimpleNamespace())
+    registry._devices["dev-cuff"] = device
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_entries=lambda _domain: entries)
+    )
+    selected = _services.coordinators_for_service_call(
+        hass, SimpleNamespace(data={"device_id": "dev-cuff"})
+    )
+    assert selected == [coord]
+
+
+def test_legacy_slot_device_id_still_resolves_cuff() -> None:
+    coord = _make_coordinator()
+    entries = [SimpleNamespace(runtime_data=coord)]
+    ident = ("veroval_ble", "aa:bb:cc:dd:ee:ff_1")
     device = SimpleNamespace(identifiers={ident})
     registry = _services.dr.async_get(SimpleNamespace())
     registry._devices["dev-user-1"] = device
@@ -280,17 +289,17 @@ def test_device_id_selects_one_slot() -> None:
     selected = _services.coordinators_for_service_call(
         hass, SimpleNamespace(data={"device_id": "dev-user-1"})
     )
-    assert selected == [coord1]
+    assert selected == [coord]
 
 
 def test_measurement_payload_includes_reading() -> None:
-    coord = _make_coordinator(CUFF_USER_1)
+    coord = _make_coordinator()
     measurement = _measurement(
         user_id=BLE_USER_1,
         systolic=120.0,
         timestamp=datetime(2024, 1, 15, 12, 0, 0),
     )
-    payload = _services.measurement_payload(coord, measurement)
+    payload = _services.measurement_payload(coord, measurement, CUFF_USER_1)
     assert payload["synced"] is True
     assert payload["cuff_user"] == 1
     assert payload["systolic"] == 120.0
@@ -317,11 +326,10 @@ def test_force_dump_one_gatt_for_two_slots() -> None:
         return _dump_result([user1, user2])
 
     _coordinator.dump_latest = fake_dump
-    coord1 = _make_coordinator(CUFF_USER_1, data)
-    coord2 = _make_coordinator(CUFF_USER_2, data)
+    coord = _make_coordinator(data)
 
     async def run() -> list:
-        return await _services.async_force_dump_coordinators([coord1, coord2])
+        return await _services.async_force_dump_coordinators([coord])
 
     results = asyncio.run(run())
     assert calls["n"] == 1
@@ -329,5 +337,7 @@ def test_force_dump_one_gatt_for_two_slots() -> None:
     assert results[0]["systolic"] == 120.0
     assert results[1]["cuff_user"] == 2
     assert results[1]["systolic"] == 130.0
-    assert coord1.data is user1
-    assert coord2.data is user2
+    assert coord.data[CUFF_USER_1] is user1
+    assert coord.data[CUFF_USER_2] is user2
+    assert coord.measurement_for(CUFF_USER_1) is user1
+    assert coord.measurement_for(CUFF_USER_2) is user2

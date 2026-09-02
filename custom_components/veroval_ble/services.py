@@ -11,9 +11,10 @@ from homeassistant.helpers import device_registry as dr
 
 from .const import DOMAIN, SERVICE_FORCE_DUMP
 from .coordinator import CuffNotConnectableError, VerovalBleCoordinator
-from .parser import BloodPressureMeasurement
+from .parser import CUFF_USER_1, CUFF_USER_2, BloodPressureMeasurement
 
 _SERVICES_FLAG = f"{DOMAIN}_services_registered"
+_CUFF_USERS = (CUFF_USER_1, CUFF_USER_2)
 
 
 def _loaded_coordinators(hass: HomeAssistant) -> list[VerovalBleCoordinator]:
@@ -27,7 +28,7 @@ def _loaded_coordinators(hass: HomeAssistant) -> list[VerovalBleCoordinator]:
 
 
 def _ident_for(coordinator: VerovalBleCoordinator) -> str:
-    return f"{coordinator.address}_{coordinator.cuff_user}".lower()
+    return coordinator.address.lower()
 
 
 def coordinators_for_service_call(
@@ -58,12 +59,15 @@ def coordinators_for_service_call(
         for ident_domain, ident in device.identifiers:
             if ident_domain != DOMAIN:
                 continue
-            coord = by_ident.get(str(ident).lower())
+            key = str(ident).lower()
+            if key.endswith("_1") or key.endswith("_2"):
+                key = key.rsplit("_", 1)[0]
+            coord = by_ident.get(key)
             if coord is None:
                 continue
-            key = _ident_for(coord)
-            if key not in seen:
-                seen.add(key)
+            ident_key = _ident_for(coord)
+            if ident_key not in seen:
+                seen.add(ident_key)
                 selected.append(coord)
             matched = True
         if not matched:
@@ -76,11 +80,12 @@ def coordinators_for_service_call(
 def measurement_payload(
     coordinator: VerovalBleCoordinator,
     measurement: BloodPressureMeasurement | None,
+    cuff_user: int | None = None,
 ) -> dict[str, Any]:
     """JSON-friendly dump result for Developer Tools."""
     payload: dict[str, Any] = {
         "address": coordinator.address,
-        "cuff_user": coordinator.cuff_user,
+        "cuff_user": cuff_user,
         "synced": measurement is not None,
     }
     if measurement is None:
@@ -100,23 +105,26 @@ def measurement_payload(
 async def async_force_dump_coordinators(
     coordinators: list[VerovalBleCoordinator],
 ) -> list[dict[str, Any]]:
-    """Force one GATT dump per cuff address; other slots consume that dump."""
+    """Force one GATT dump per cuff address; publish both user slots."""
     dumped_addresses: set[str] = set()
     results: list[dict[str, Any]] = []
     for coordinator in coordinators:
         address = coordinator.address.lower()
+        if address in dumped_addresses:
+            continue
         try:
-            if address in dumped_addresses:
-                measurement = coordinator.device_data.consume_shared_dump(
-                    coordinator.cuff_user
-                )
-                coordinator.async_publish_measurement(measurement)
-            else:
-                measurement = await coordinator.async_force_poll()
-                dumped_addresses.add(address)
+            await coordinator.async_force_poll()
         except CuffNotConnectableError as err:
             raise HomeAssistantError(str(err)) from err
-        results.append(measurement_payload(coordinator, measurement))
+        dumped_addresses.add(address)
+        for cuff_user in _CUFF_USERS:
+            results.append(
+                measurement_payload(
+                    coordinator,
+                    coordinator.measurement_for(cuff_user),
+                    cuff_user,
+                )
+            )
     return results
 
 

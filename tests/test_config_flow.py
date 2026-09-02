@@ -75,6 +75,9 @@ class _StubConfigFlow:
     def _set_confirm_only(self) -> None:
         return None
 
+    def async_create_entry(self, title: str, data: dict) -> dict:
+        return {"type": "create_entry", "title": title, "data": data}
+
 
 def _install_stubs() -> None:
     if "homeassistant.config_entries" in sys.modules:
@@ -154,6 +157,15 @@ def _slot_entry(cuff_user: int) -> SimpleNamespace:
     return SimpleNamespace(
         unique_id=f"{ADDRESS}_{cuff_user}",
         data={CONF_ADDRESS: ADDRESS, CONF_CUFF_USER: cuff_user},
+        version=1,
+    )
+
+
+def _v2_entry() -> SimpleNamespace:
+    return SimpleNamespace(
+        unique_id=ADDRESS,
+        data={CONF_ADDRESS: ADDRESS},
+        version=2,
     )
 
 
@@ -211,9 +223,9 @@ def _abort_reason(result_or_exc: object) -> str:
     return str(result_or_exc["reason"])
 
 
-def test_bluetooth_both_slots_binds_slot_unique_id_not_mac() -> None:
-    """Fully configured cuff: unique_id is address_1 so HA treats it as handled."""
-    flow = _flow([_slot_entry(1), _slot_entry(2)])
+def test_bluetooth_configured_cuff_aborts_with_mac_unique_id() -> None:
+    """A v2 cuff entry (or leftover v1 slots) is already configured."""
+    flow = _flow([_v2_entry()])
 
     async def _run() -> object:
         try:
@@ -223,18 +235,22 @@ def test_bluetooth_both_slots_binds_slot_unique_id_not_mac() -> None:
 
     outcome = asyncio.run(_run())
     assert _abort_reason(outcome) == "already_configured"
-    assert flow.unique_id == f"{ADDRESS}_1"
-    assert flow.unique_id != ADDRESS
-
-
-def test_bluetooth_one_slot_uses_mac_and_does_not_abort() -> None:
-    """User 1 exists: MAC is a temporary flow id so User 2 can still be added."""
-    flow = _flow([_slot_entry(1), _ignore_mac_entry()])
-
-    result = asyncio.run(flow.async_step_bluetooth(_discovery()))
     assert flow.unique_id == ADDRESS
-    assert result["type"] == "form"
-    assert result["step_id"] == "bluetooth_confirm"
+
+
+def test_bluetooth_legacy_slot_is_already_configured() -> None:
+    """A leftover 0.2.0 User 1 entry still blocks a second add of the cuff."""
+    flow = _flow([_slot_entry(1)])
+
+    async def _run() -> object:
+        try:
+            return await flow.async_step_bluetooth(_discovery())
+        except AbortFlow as err:
+            return err
+
+    outcome = asyncio.run(_run())
+    assert _abort_reason(outcome) == "already_configured"
+    assert flow.unique_id == ADDRESS
 
 
 def test_bluetooth_zero_slots_honors_ignore_mac() -> None:
@@ -268,16 +284,23 @@ def test_choose_address_both_slots_aborts_without_mac_unique_id() -> None:
     assert flow.unique_id is None
 
 
-def test_choose_address_one_slot_sets_mac_then_pairs() -> None:
+def test_choose_address_one_slot_aborts_already_configured() -> None:
     flow = _flow([_slot_entry(1)])
-
-    async def _fake_pairing() -> dict:
-        return {"type": "form", "step_id": "pairing"}
-
-    flow.async_step_pairing = _fake_pairing  # type: ignore[method-assign]
     result = asyncio.run(flow._async_choose_address(ADDRESS))
+    assert result["type"] == "abort"
+    assert result["reason"] == "already_configured"
+    assert flow.unique_id is None
+
+
+def test_finish_setup_creates_mac_entry() -> None:
+    flow = _flow([])
+    flow._address = ADDRESS
+    flow._name = "BPU26"
+    result = asyncio.run(flow._async_finish_setup())
+    assert result["type"] == "create_entry"
+    assert result["title"] == "BPU26"
+    assert result["data"] == {CONF_ADDRESS: ADDRESS}
     assert flow.unique_id == ADDRESS
-    assert result["step_id"] == "pairing"
 
 
 def test_bluetooth_confirm_proxy_only_aborts_without_scan() -> None:

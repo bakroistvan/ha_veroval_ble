@@ -22,7 +22,7 @@ from homeassistant.util import dt as dt_util
 
 from .coordinator import VerovalBleConfigEntry
 from .entity import VerovalBleEntity
-from .parser import BloodPressureMeasurement
+from .parser import CUFF_USER_1, CUFF_USER_2, BloodPressureMeasurement
 
 type _ValueT = float | int | str | datetime | None
 
@@ -81,13 +81,6 @@ SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
     ),
 )
 
-USER_SLOT_DESCRIPTION = SensorEntityDescription(
-    key="user_slot",
-    translation_key="user_slot",
-    icon="mdi:account",
-    entity_category=EntityCategory.DIAGNOSTIC,
-)
-
 _VALUE_GETTERS: dict[str, Callable[[BloodPressureMeasurement], _ValueT]] = {
     "systolic": _systolic,
     "diastolic": _diastolic,
@@ -121,19 +114,19 @@ async def async_setup_entry(
 ) -> None:
     """Set up Veroval BLE sensors."""
     coordinator = entry.runtime_data
-    async_add_entities(
-        [
-            *(
-                VerovalBleSensor(coordinator, description)
-                for description in SENSOR_DESCRIPTIONS
-            ),
-            VerovalBleUserSlotSensor(coordinator, USER_SLOT_DESCRIPTION),
-            VerovalBleRssiSensor(coordinator, RSSI_DESCRIPTION),
+    entities: list[SensorEntity] = []
+    for cuff_user in (CUFF_USER_1, CUFF_USER_2):
+        entities.extend(
+            VerovalBleSensor(coordinator, description, cuff_user)
+            for description in SENSOR_DESCRIPTIONS
+        )
+        entities.append(
             VerovalBleLastSynchronizedSensor(
-                coordinator, LAST_SYNCHRONIZED_DESCRIPTION
-            ),
-        ]
-    )
+                coordinator, LAST_SYNCHRONIZED_DESCRIPTION, cuff_user
+            )
+        )
+    entities.append(VerovalBleRssiSensor(coordinator, RSSI_DESCRIPTION))
+    async_add_entities(entities)
 
 
 class VerovalBleSensor(VerovalBleEntity, SensorEntity):
@@ -142,30 +135,16 @@ class VerovalBleSensor(VerovalBleEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Stay available after a successful poll (sleepy cuff)."""
-        return self.coordinator.data is not None
+        return self.coordinator.measurement_for(self.cuff_user) is not None
 
     @property
     def native_value(self) -> _ValueT:
         """Return the decoded field for this sensor."""
-        measurement = self.coordinator.data
+        measurement = self.coordinator.measurement_for(self.cuff_user)
         if measurement is None:
             return None
         getter = _VALUE_GETTERS[self.entity_description.key]
         return getter(measurement)
-
-
-class VerovalBleUserSlotSensor(VerovalBleEntity, SensorEntity):
-    """Configured cuff user slot (User 1 / User 2)."""
-
-    @property
-    def available(self) -> bool:
-        """Slot comes from the config entry, not from a poll."""
-        return True
-
-    @property
-    def native_value(self) -> str:
-        """Return the cuff button label for this config entry."""
-        return f"User {self.coordinator.cuff_user}"
 
 
 class VerovalBleRssiSensor(VerovalBleEntity, SensorEntity):
@@ -188,9 +167,9 @@ class VerovalBleLastSynchronizedSensor(VerovalBleEntity, SensorEntity):
     @property
     def available(self) -> bool:
         """Available after at least one successful dump for this slot."""
-        return self.coordinator.last_synchronized is not None
+        return self.coordinator.last_synchronized_for(self.cuff_user) is not None
 
     @property
     def native_value(self) -> datetime | None:
         """Return when this slot last consumed a GATT dump."""
-        return self.coordinator.last_synchronized
+        return self.coordinator.last_synchronized_for(self.cuff_user)
