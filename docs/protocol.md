@@ -1,17 +1,17 @@
 # Veroval compact+ protocol discovery
 
 Reverse-engineering notes for the **Veroval compact+ BPU 26** BLE link to **medi.connect**.
-Status: **pairing + history dump decoded** from a local `fresh_pairing.btsnoop`. Standard SIG Blood Pressure Service. No RACP; enabling indications dumps stored records.
+Status: **pairing + history dump decoded** from a local `fresh_pairing.btsnoop`. **User-button vs post-measurement advertise** compared in local `user_button_only.btsnoop` / `post_measurement.btsnoop` (issue #29): ADV_IND fields and medi.connect GATT are the same. Standard SIG Blood Pressure Service. No RACP; enabling indications dumps stored records.
 
 **Privacy:** MAC address, pairing PIN, and measurement examples below are **scrambled placeholders**. Protocol structure (GATT, flags, dump order) is real.
 
-## Device behavior (from manual)
+## Device behavior (from manual + captures)
 
 | Step | Behavior |
 |------|----------|
 | 1 | Press **User 1** or **User 2** on the cuff |
 | 2 | Bluetooth symbol **flashes**; cuff advertises ~2 minutes. A new measurement is **not** required |
-| 3 | Completing a measurement also starts the same advertise window; the result stays on the display |
+| 3 | Completing a measurement **also** starts an advertise window; the result stays on the display. Radio PDU is the **same** as a User-button flash (see §7) |
 | 4 | Open medi.connect (or a bonded host) while the symbol flashes → transfer starts |
 | 5 | First pairing: cuff shows **6-digit PIN**; enter on the connecting device |
 
@@ -21,6 +21,8 @@ The PIN is handled by the **OS Bluetooth stack** (SMP Passkey Entry), not by cus
 
 - [x] `docs/captures/bonded_transfer.btsnoop` — first bugreport; **ads only** (HCI Reset, no connect)
 - [x] `docs/captures/fresh_pairing.btsnoop` — local capture; Passkey Entry + full memory dump
+- [x] `docs/captures/user_button_only.btsnoop` — issue #29 Capture C; User 2, no new reading; bonded dump
+- [x] `docs/captures/post_measurement.btsnoop` — issue #29 Capture D; rolling log includes C + D; bonded dump after a new reading
 - [ ] `docs/captures/ground_truth_bonded.md` filled with cuff + app values (local; gitignored)
 - [ ] `docs/captures/ground_truth_pairing.md` filled (local; gitignored)
 - [x] Run `python scripts/analyze_capture.py …` → exports under `docs/captures/exports/` (local; gitignored)
@@ -29,7 +31,7 @@ The PIN is handled by the **OS Bluetooth stack** (SMP Passkey Entry), not by cus
 
 ## 1. Advertisement
 
-Unchanged from the first capture; same cuff in the pairing log.
+Same cuff as the pairing log. User-button and post-measurement windows use this PDU (issue #29).
 
 | Field | Observed value |
 |-------|----------------|
@@ -43,6 +45,8 @@ Unchanged from the first capture; same cuff in the pairing log.
 | Scan response | empty |
 
 Wireshark: `bthci_evt.bd_addr == aa:bb:cc:dd:ee:ff`
+
+The table is from pairing/bonded captures. Issue #29 (User-button-only vs auto-advertise after a reading) did **not** change these fields — see §7.
 
 ---
 
@@ -196,14 +200,68 @@ A driver that only wants the latest reading can take the **first** indication af
 
 ---
 
-## 7. Open questions
+## 7. User-button vs post-measurement advertise (issue #29)
+
+Hypothesis to test: after a new reading the cuff auto-opens Bluetooth, but Home Assistant’s live-ad poll does not start, while `veroval_ble.force_dump` in the same window succeeds. If ADV_IND fields differed (flags, manufacturer payload, connectable bit, name), the scanner/coordinator matchers could miss that window.
+
+**Captures** (same Galaxy S8, same bond, User 2; medi.connect opened while flashing; raw logs gitignored):
+
+| | Capture C — User button only | Capture D — post-measurement auto BT |
+|--|--|--|
+| Stimulus | User 2, cuff asleep, **no** new reading | New measurement, **no** extra User press; cuff turns BT on by itself |
+| Wall clock | button ~21:15, app ~21:16 | measurement started ~21:22 |
+| HCI relative | ads ~540.84 s, connect ~540.95 s | ads ~945.58 s, connect ~945.68 s |
+| `0x2A35` indications | 114 | 115 (one extra stored record) |
+
+Android HCI snoop only logged **two ADV_IND + one empty SCAN_RSP** per window, clustered ~100 ms before **LE Connection Complete**. That is the phone delivering scan results at connect time, not a full ~2 minute ad trace. Advertising **interval** and “time from result-on-display to first ADV” are **not** measurable from these logs.
+
+### ADV_IND (identical)
+
+Filter: `bthci_evt.le_meta_subevent == 0x02`
+
+| Field | Capture C | Capture D |
+|-------|-----------|-----------|
+| Complete Local Name | `BPU26` | `BPU26` |
+| Event type | ADV_IND `0x00` (connectable undirected) | same |
+| Limited Discoverable | yes | yes |
+| General Discoverable | no | no |
+| BR/EDR Not Supported | yes | yes |
+| Service UUID | incomplete list `0x1810` | same |
+| Manufacturer `0x0ABF` | payload `01 02` | `01 02` |
+| Scan response | empty (`0x04`) | empty |
+
+Scrambled example (structure only): name `BPU26`, flags Limited + BR/EDR Not Supported, UUID `0x1810`, manufacturer `0x0ABF` / `01 02`.
+
+### GATT after connect (identical trigger)
+
+Both windows, already bonded, **no SMP**:
+
+1. LE Enhanced Connection Complete
+2. CCCD write handle `0x0020` = Indicate (`0x0002`)
+3. Read Firmware Revision handle `0x0016`
+4. `0x2A35` indications (full store) + confirms
+5. Disconnect ~12 s after connect
+
+No write to Intermediate Cuff Pressure CCCD (`0x2A36`). Blood Pressure Feature (`0x2A49`) not read. No extra clock write. A new reading does **not** change medi.connect’s dump recipe; CCCD-only is enough.
+
+### What this means for Home Assistant
+
+The post-measurement window is **not** a different advertisement. `poll_needed` / BlueZ / `connectable=True` / manufacturer `0x0ABF` matching that works for a User-button flash should also match auto-advertise after a reading. If HA still misses that window while `force_dump` works, the miss is **scanner or coordinator gating** (live-ad age, cache replay, phone grace, window gap), not a distinct cuff PDU.
+
+Not captured here: cuff advertising with medi.connect closed and phone BT off (the HA-only miss). Window **duration** if no central connects (~2 min) is still from the manual, not from these two short connects.
+
+---
+
+## 8. Open questions
 
 1. Does opening the app **before** measurement change the sequence?
 2. Cuff clock: timestamps look like device-local time. Is it ever written from the phone? (Device Name/Appearance are writable.)
 3. What is status `0x8000`? Rest indicator vs other quality bit — need a labeled capture.
-4. Bonded reconnect: is the sequence CCCD-write → dump only, skipping SMP?
-5. Intermediate Cuff Pressure (`0x2A36`): live values during inflation, or unused by medi.connect?
+4. Bonded reconnect: CCCD-write → dump, skipping SMP? **yes** — Captures C and D (issue #29).
+5. Intermediate Cuff Pressure (`0x2A36`): live values during inflation, or unused by medi.connect? Unused in pairing + C + D.
 6. Blood Pressure Feature (`0x2A49`) bits not read in this session.
+7. Advertising interval and delay from “result on display” to first ADV — need a scanner that logs ads for the whole window (nRF / HA `habluetooth` DEBUG), not phone HCI at connect time.
+8. Does the cuff stop advertising after ~2 min if no central connects, same for both windows?
 
 ---
 
@@ -213,6 +271,7 @@ A driver that only wants the latest reading can take the **first** indication af
 - [BPU 26 manual (Bluetooth chapter)](https://www.manual.nz/hartmann/veroval-compact-bpu26/manual)
 - [Bluetooth Blood Pressure Service 0x1810](https://www.bluetooth.com/specifications/specs/blood-pressure-service-1-1-1/)
 - Analysis script: `scripts/analyze_capture.py`
+- Capture session timer: `python scripts/capture_session.py` (wall-clock clicks vs HCI / HA logs)
 - Local exports: `docs/captures/exports/` (gitignored)
 
 ## Later (out of scope for discovery)

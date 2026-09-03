@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Capture session timer GUI (`python scripts/capture_session.py`) for wall-clock event marks (A–D, quality, HA-only, generic SIG BPS).
+
+### Changed
+
+- Document User-button vs post-measurement advertise (issue #29): ADV_IND fields and medi.connect GATT are the same; HA miss is not a distinct cuff PDU.
+
 ## [0.3.0] - 2026-09-03
 
 ### Added
