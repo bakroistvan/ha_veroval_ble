@@ -8,6 +8,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-03
+
+### Added
+
+- Capture session timer GUI (`python scripts/capture_session.py`) for wall-clock event marks (A–D, quality, HA-only, generic SIG BPS).
+- Configure options for phone grace and related dump timings (advertisement silence, advertising linger, poll-window gap, dump timeout / idle).
+
+### Changed
+
+- Document User-button vs post-measurement advertise (issue #29): ADV_IND fields and medi.connect GATT are the same; HA miss is not a distinct cuff PDU.
+
+### Fixed
+
+- Force data sync button no longer crashes setup (`last_update_success` missing on the Bluetooth coordinator). That exception aborted every GATT dump after User 1/2 and toggled Connected every 2s.
+- BlueZ RSSI watch runs as a background task so it does not block Home Assistant startup or shutdown.
+- Cached BlueZ Device1 RSSI no longer opens a new dump window every 2s after the cuff sleeps (rising-edge only). Stops reconnect timeouts and Connected stuck on while asleep.
+
 ## [0.3.0] - 2026-09-03
 
 ### Added
@@ -53,6 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sensors: systolic, diastolic, pulse, measured time, user slot; irregular-pulse binary sensor.
 - HIL dump script and unit tests for parser, client, coordinator, and config flow.
 
+[0.4.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.4.0
 [0.3.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.3.0
 [0.2.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.2.0
 [0.1.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.1.0

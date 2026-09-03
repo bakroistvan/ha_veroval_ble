@@ -252,12 +252,13 @@ def _adapter_path_for_device(device_path: str) -> str:
 
 
 def rssi_from_device_props(props: dict[str, Any]) -> int | None:
-    """Return Device1 RSSI if BlueZ is currently receiving advertisements.
+    """Return Device1 RSSI if present on the BlueZ object.
 
-    RSSI is absent from Device1 while the cuff is asleep (cached Name /
-    ManufacturerData remain). Presence is a live radio sighting even when
-    Home Assistant's scanner does not emit BluetoothServiceInfoBleak.
-    RSSI is also usually absent while Connected is true (GATT link up).
+    RSSI is usually absent while Connected is true (GATT link up) and while
+    the cuff is fully asleep. GetManagedObjects can still keep a stale RSSI
+    value after the flash ends — presence alone is not a new advertisement
+    packet. The coordinator treats absent→present as a rising edge only.
+    Cached Name / ManufacturerData remain regardless of RSSI.
     """
     if "RSSI" not in props:
         return None
@@ -390,7 +391,8 @@ async def async_watch_device_rssi(
 ) -> None:
     """Call *on_rssi* / *on_connected* from BlueZ Device1 for *address*.
 
-    RSSI is present while the cuff is advertising and not connected.
+    *on_rssi* receives an int while Device1 has RSSI, or ``None`` when RSSI
+    is missing or Device1 is gone (so the coordinator can track rising edge).
     Connected matches ``bluetoothctl info`` ``Connected: yes/no``.
     Runs until cancelled. No-op when this host cannot talk to BlueZ.
     """
@@ -409,12 +411,12 @@ async def async_watch_device_rssi(
             while True:
                 radio = await _radio_for_address(bus, address)
                 if radio is None:
+                    on_rssi(None)
                     if on_connected is not None:
                         on_connected(False)
                 else:
                     rssi, connected = radio
-                    if rssi is not None:
-                        on_rssi(rssi)
+                    on_rssi(rssi)
                     if on_connected is not None:
                         on_connected(connected)
                 await asyncio.sleep(interval)

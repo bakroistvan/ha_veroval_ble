@@ -17,9 +17,15 @@ from homeassistant.components.bluetooth import (
     async_discovered_service_info,
     async_register_callback,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
+from homeassistant.helpers.selector import NumberSelector, NumberSelectorConfig
 
 from .bluez_pair import (
     AgentUnavailableError,
@@ -38,11 +44,24 @@ from .bluez_pair import (
 from .advertisement import advertisement_is_live
 from .const import (
     ADVERTISEMENT_MAX_AGE_SECONDS,
+    ADVERTISE_LINGER_RANGE,
+    AD_SILENCE_RANGE,
+    CONF_ADVERTISE_LINGER_SECONDS,
+    CONF_AD_SILENCE_SECONDS,
+    CONF_DUMP_IDLE_SECONDS,
+    CONF_DUMP_TIMEOUT_SECONDS,
+    CONF_PHONE_GRACE_SECONDS,
     CONF_PIN,
+    CONF_POLL_WINDOW_GAP_SECONDS,
     DOMAIN,
+    DUMP_IDLE_RANGE,
+    DUMP_TIMEOUT_RANGE,
     LOCAL_NAME,
     MANUFACTURER_ID,
+    PHONE_GRACE_RANGE,
+    POLL_WINDOW_GAP_RANGE,
     SCAN_TIMEOUT_SECONDS,
+    options_schema_defaults,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -122,6 +141,12 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
     """
 
     VERSION = 2
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow for Configure."""
+        return VerovalBleOptionsFlow()
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -811,3 +836,73 @@ class VerovalBleConfigFlow(ConfigFlow, domain=DOMAIN):
             title=self._name or LOCAL_NAME,
             data={CONF_ADDRESS: address},
         )
+
+
+def _seconds_selector(minimum: float, maximum: float, step: float = 1) -> NumberSelector:
+    """Number selector for whole seconds."""
+    return NumberSelector(
+        NumberSelectorConfig(min=minimum, max=maximum, step=step, unit_of_measurement="s")
+    )
+
+
+def _options_schema(defaults: dict[str, int | float]) -> vol.Schema:
+    """Build the Configure form schema with *defaults* as current values."""
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_PHONE_GRACE_SECONDS,
+                default=defaults[CONF_PHONE_GRACE_SECONDS],
+            ): _seconds_selector(*PHONE_GRACE_RANGE),
+            vol.Optional(
+                CONF_AD_SILENCE_SECONDS,
+                default=defaults[CONF_AD_SILENCE_SECONDS],
+            ): _seconds_selector(*AD_SILENCE_RANGE),
+            vol.Optional(
+                CONF_ADVERTISE_LINGER_SECONDS,
+                default=defaults[CONF_ADVERTISE_LINGER_SECONDS],
+            ): _seconds_selector(*ADVERTISE_LINGER_RANGE),
+            vol.Optional(
+                CONF_POLL_WINDOW_GAP_SECONDS,
+                default=defaults[CONF_POLL_WINDOW_GAP_SECONDS],
+            ): _seconds_selector(*POLL_WINDOW_GAP_RANGE),
+            vol.Optional(
+                CONF_DUMP_TIMEOUT_SECONDS,
+                default=defaults[CONF_DUMP_TIMEOUT_SECONDS],
+            ): _seconds_selector(*DUMP_TIMEOUT_RANGE),
+            vol.Optional(
+                CONF_DUMP_IDLE_SECONDS,
+                default=defaults[CONF_DUMP_IDLE_SECONDS],
+            ): _seconds_selector(*DUMP_IDLE_RANGE),
+        }
+    )
+
+
+class VerovalBleOptionsFlow(OptionsFlow):
+    """Configure dump / advertise timing for one cuff."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show or save dump timing options."""
+        if user_input is not None:
+            # NumberSelector may return floats; store ints for whole-second fields.
+            data = {
+                CONF_PHONE_GRACE_SECONDS: int(user_input[CONF_PHONE_GRACE_SECONDS]),
+                CONF_AD_SILENCE_SECONDS: int(user_input[CONF_AD_SILENCE_SECONDS]),
+                CONF_ADVERTISE_LINGER_SECONDS: int(
+                    user_input[CONF_ADVERTISE_LINGER_SECONDS]
+                ),
+                CONF_POLL_WINDOW_GAP_SECONDS: int(
+                    user_input[CONF_POLL_WINDOW_GAP_SECONDS]
+                ),
+                CONF_DUMP_TIMEOUT_SECONDS: int(user_input[CONF_DUMP_TIMEOUT_SECONDS]),
+                CONF_DUMP_IDLE_SECONDS: int(user_input[CONF_DUMP_IDLE_SECONDS]),
+            }
+            return self.async_create_entry(title="", data=data)
+
+        defaults = options_schema_defaults(self.config_entry.options)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=_options_schema(defaults),
+        )
+

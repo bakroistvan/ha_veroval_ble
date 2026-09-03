@@ -105,6 +105,9 @@ async def scan_bpu26(timeout: float = 20.0) -> list[BLEDevice]:
 
 async def drain_indications(
     client: BleakClientWithServiceCache,
+    *,
+    dump_idle: float = DUMP_IDLE_SECONDS,
+    dump_timeout: float = DUMP_TIMEOUT_SECONDS,
 ) -> list[BloodPressureMeasurement]:
     """Collect all 0x2A35 indications until idle or timeout."""
     records: list[BloodPressureMeasurement] = []
@@ -132,23 +135,23 @@ async def drain_indications(
         while True:
             now = loop.time()
             elapsed = now - start
-            if elapsed >= DUMP_TIMEOUT_SECONDS:
+            if elapsed >= dump_timeout:
                 if not records:
                     _LOGGER.warning(
                         "Timed out waiting for BPM indications after %ss",
-                        DUMP_TIMEOUT_SECONDS,
+                        dump_timeout,
                     )
                 else:
                     _LOGGER.warning(
                         "Indication dump hit %ss ceiling (%s records)",
-                        DUMP_TIMEOUT_SECONDS,
+                        dump_timeout,
                         len(records),
                     )
                 break
             if len(records) != last_count:
                 last_count = len(records)
                 last_change = now
-            elif last_count > 0 and (now - last_change) >= DUMP_IDLE_SECONDS:
+            elif last_count > 0 and (now - last_change) >= dump_idle:
                 break
             await asyncio.sleep(0.05)
     finally:
@@ -177,7 +180,12 @@ async def _safe_stop_notify(client: BleakClientWithServiceCache) -> None:
         _LOGGER.debug("stop_notify failed: %s", err, exc_info=True)
 
 
-async def dump_records(device: BLEDevice) -> DumpResult:
+async def dump_records(
+    device: BLEDevice,
+    *,
+    dump_idle: float = DUMP_IDLE_SECONDS,
+    dump_timeout: float = DUMP_TIMEOUT_SECONDS,
+) -> DumpResult:
     """Connect, drain all BPM indications, disconnect. No slot filter."""
     _LOGGER.debug("Connecting to %s", device.address)
     try:
@@ -208,7 +216,9 @@ async def dump_records(device: BLEDevice) -> DumpResult:
             )
             missing = True
         else:
-            records = await drain_indications(client)
+            records = await drain_indications(
+                client, dump_idle=dump_idle, dump_timeout=dump_timeout
+            )
     except (BleakError, TimeoutError) as err:
         if is_auth_error(err):
             _LOGGER.warning(
@@ -228,10 +238,18 @@ async def dump_records(device: BLEDevice) -> DumpResult:
     return DumpResult(records, None, counts, missing_characteristic=missing)
 
 
-async def dump_latest(device: BLEDevice, cuff_user: int) -> DumpResult:
+async def dump_latest(
+    device: BLEDevice,
+    cuff_user: int,
+    *,
+    dump_idle: float = DUMP_IDLE_SECONDS,
+    dump_timeout: float = DUMP_TIMEOUT_SECONDS,
+) -> DumpResult:
     """Drain dump and return newest record for *cuff_user* (1 or 2)."""
     ble_user_id = cuff_user_to_ble_id(cuff_user)
-    result = await dump_records(device)
+    result = await dump_records(
+        device, dump_idle=dump_idle, dump_timeout=dump_timeout
+    )
     if result.auth_error or result.missing_characteristic or not result.records:
         return result
 

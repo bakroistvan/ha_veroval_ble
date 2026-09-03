@@ -10,6 +10,9 @@ docs/captures/exports/
 # Filled session notes may contain PIN and cuff readings (keep templates tracked)
 docs/captures/ground_truth_*.md
 
+# Wall-clock click logs from scripts/capture_session.py
+docs/captures/sessions/
+
 # Keep capture guide and templates
 !docs/captures/README.md
 !docs/captures/WIRESHARK.md

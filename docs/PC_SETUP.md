@@ -202,6 +202,14 @@ python scripts/analyze_capture.py docs/captures/bonded_transfer.btsnoop
 
 Outputs land in `docs/captures/exports/` (JSON, CSV, Markdown notes).
 
+During a capture, stamp wall-clock events (measurement, Bluetooth flash, app open) with:
+
+```powershell
+python scripts/capture_session.py
+```
+
+Logs land in `docs/captures/sessions/` (gitignored). See [captures/README.md](captures/README.md).
+
 ---
 
 ## What stays on the phone (not this PC)

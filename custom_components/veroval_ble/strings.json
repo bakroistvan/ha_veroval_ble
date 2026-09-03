@@ -61,6 +61,30 @@
       "stale_advertisement": "That BPU26 discovery is from Home Assistant’s advertisement cache, not a live advertise window. Press User 1 or User 2 so Bluetooth flashes, then try again."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Dump timing",
+        "description": "Phone grace waits for medi.connect before Home Assistant connects. Grace plus dump timeout should stay under the cuff’s ~120 second Bluetooth flash. Force data sync ignores phone grace.",
+        "data": {
+          "phone_grace_seconds": "Phone grace (seconds)",
+          "ad_silence_seconds": "Advertisement silence for new window (seconds)",
+          "advertise_linger_seconds": "Advertising linger after last sighting (seconds)",
+          "poll_window_gap_seconds": "Poll window gap (seconds)",
+          "dump_timeout_seconds": "Dump timeout (seconds)",
+          "dump_idle_seconds": "Dump idle gap (seconds)"
+        },
+        "data_description": {
+          "phone_grace_seconds": "Wait after the first advertisement so the phone app can sync first. Use 0 to dump immediately.",
+          "ad_silence_seconds": "How long live advertisements must be gone before the next flash starts a new dump window.",
+          "advertise_linger_seconds": "How long assumed-state / advertising linger lasts after the last live sighting.",
+          "poll_window_gap_seconds": "Last-resort expiry if Home Assistant never marks the cuff unavailable.",
+          "dump_timeout_seconds": "Hard ceiling for one GATT indication dump.",
+          "dump_idle_seconds": "Quiet time after the last indication that ends the dump."
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "systolic": {

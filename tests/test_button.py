@@ -176,6 +176,12 @@ def test_press_calls_force_poll() -> None:
     assert calls["n"] == 1
 
 
+def test_button_available_without_last_update_success() -> None:
+    coordinator = SimpleNamespace(address="AA:BB:CC:DD:EE:FF", available=False)
+    button = VerovalBleForceDumpButton(coordinator, FORCE_DUMP_DESCRIPTION)
+    assert button.available is True
+
+
 def test_press_raises_when_cuff_not_connectable() -> None:
     async def async_force_poll() -> dict:
         raise _CuffNotConnectableError(
