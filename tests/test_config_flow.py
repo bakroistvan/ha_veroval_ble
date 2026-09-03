@@ -86,7 +86,7 @@ def _install_stubs() -> None:
     vol = ModuleType("voluptuous")
     vol.Schema = lambda *a, **k: object()  # type: ignore[attr-defined]
     vol.Required = lambda x, *a, **k: x  # type: ignore[attr-defined]
-    vol.Optional = lambda x, *a, **k: x  # type: ignore[attr-defined]
+    vol.Optional = lambda x, default=None, *a, **k: x  # type: ignore[attr-defined]
     vol.In = lambda x: x  # type: ignore[attr-defined]
     sys.modules["voluptuous"] = vol
 
@@ -96,6 +96,8 @@ def _install_stubs() -> None:
     ha_ce = ModuleType("homeassistant.config_entries")
     ha_const = ModuleType("homeassistant.const")
     ha_core = ModuleType("homeassistant.core")
+    ha_helpers = ModuleType("homeassistant.helpers")
+    ha_selector = ModuleType("homeassistant.helpers.selector")
 
     ha_bt.BluetoothChange = type("BluetoothChange", (), {})
     ha_bt.BluetoothScanningMode = SimpleNamespace(ACTIVE="active")
@@ -104,12 +106,32 @@ def _install_stubs() -> None:
     ha_bt.async_discovered_service_info = lambda *a, **k: []
     ha_bt.async_register_callback = lambda *a, **k: lambda: None
 
+    class _StubOptionsFlow:
+        def async_show_form(self, **kwargs):  # type: ignore[no-untyped-def]
+            return {"type": "form", **kwargs}
+
+        def async_create_entry(self, title: str, data: dict) -> dict:
+            return {"type": "create_entry", "title": title, "data": data}
+
     ha_ce.ConfigFlow = _StubConfigFlow
     ha_ce.ConfigFlowResult = dict
     ha_ce.AbortFlow = AbortFlow
+    ha_ce.ConfigEntry = type("ConfigEntry", (), {})
+    ha_ce.OptionsFlow = _StubOptionsFlow
 
     ha_const.CONF_ADDRESS = "address"
     ha_core.callback = lambda fn: fn
+
+    class NumberSelectorConfig:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class NumberSelector:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+    ha_selector.NumberSelector = NumberSelector
+    ha_selector.NumberSelectorConfig = NumberSelectorConfig
 
     sys.modules["homeassistant"] = ha
     sys.modules["homeassistant.components"] = ha_components
@@ -117,6 +139,8 @@ def _install_stubs() -> None:
     sys.modules["homeassistant.config_entries"] = ha_ce
     sys.modules["homeassistant.const"] = ha_const
     sys.modules["homeassistant.core"] = ha_core
+    sys.modules["homeassistant.helpers"] = ha_helpers
+    sys.modules["homeassistant.helpers.selector"] = ha_selector
 
 
 def _load_config_flow() -> ModuleType:
@@ -138,6 +162,7 @@ def _load_config_flow() -> ModuleType:
 
 _cf = _load_config_flow()
 VerovalBleConfigFlow = _cf.VerovalBleConfigFlow
+VerovalBleOptionsFlow = _cf.VerovalBleOptionsFlow
 CONF_CUFF_USER = "cuff_user"
 CONF_ADDRESS = "address"
 
@@ -446,3 +471,43 @@ def test_host_adapter_source_fallback_without_path() -> None:
     )
     assert _cf._is_host_adapter_advertisement(proxy) is False
     assert _cf._is_proxy_advertisement(proxy) is True
+
+
+def test_async_get_options_flow_returns_options_handler() -> None:
+    entry = SimpleNamespace(options={})
+    flow = VerovalBleConfigFlow.async_get_options_flow(entry)
+    assert isinstance(flow, VerovalBleOptionsFlow)
+
+
+def test_options_flow_init_shows_form() -> None:
+    flow = VerovalBleOptionsFlow()
+    flow.config_entry = SimpleNamespace(options={})  # type: ignore[attr-defined]
+    result = asyncio.run(flow.async_step_init())
+    assert result["type"] == "form"
+    assert result["step_id"] == "init"
+
+
+def test_options_flow_save_persists_ints() -> None:
+    flow = VerovalBleOptionsFlow()
+    flow.config_entry = SimpleNamespace(options={})  # type: ignore[attr-defined]
+    result = asyncio.run(
+        flow.async_step_init(
+            {
+                "phone_grace_seconds": 0.0,
+                "ad_silence_seconds": 15.0,
+                "advertise_linger_seconds": 8.0,
+                "poll_window_gap_seconds": 200.0,
+                "dump_timeout_seconds": 25.0,
+                "dump_idle_seconds": 3.0,
+            }
+        )
+    )
+    assert result["type"] == "create_entry"
+    assert result["data"] == {
+        "phone_grace_seconds": 0,
+        "ad_silence_seconds": 15,
+        "advertise_linger_seconds": 8,
+        "poll_window_gap_seconds": 200,
+        "dump_timeout_seconds": 25,
+        "dump_idle_seconds": 3,
+    }

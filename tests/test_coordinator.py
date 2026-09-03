@@ -135,7 +135,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
     if client_name not in sys.modules:
         client = ModuleType(client_name)
 
-        async def dump_latest(_ble_device: object, _cuff_user: int) -> object:
+        async def dump_latest(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
             raise AssertionError("dump_latest must be patched for poll tests")
 
         client.dump_latest = dump_latest
@@ -199,7 +199,7 @@ def test_dump_sets_window_flag_so_immediate_poll_needed_is_false() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     result = _dump_result()
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return result
 
     _coordinator.dump_latest = fake_dump
@@ -280,7 +280,7 @@ def test_consumed_slot_polls_again_after_idle_unavailable() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     result = _dump_result()
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return result
 
     _coordinator.dump_latest = fake_dump
@@ -308,7 +308,7 @@ def test_advertisement_silence_starts_new_window() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     result = _dump_result()
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return result
 
     _coordinator.dump_latest = fake_dump
@@ -336,7 +336,7 @@ def test_same_window_ads_do_not_start_new_dump() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     result = _dump_result()
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return result
 
     _coordinator.dump_latest = fake_dump
@@ -372,7 +372,7 @@ def test_force_poll_dumps_again_while_window_still_open() -> None:
     ]
     calls = {"n": 0}
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         result = dumps[min(calls["n"], len(dumps) - 1)]
         calls["n"] += 1
         return result
@@ -417,7 +417,7 @@ def test_coordinator_force_poll_updates_data() -> None:
     coordinator = _make_coordinator(data)
     coordinator.hass = SimpleNamespace()
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return result
 
     _coordinator.dump_latest = fake_dump
@@ -459,7 +459,7 @@ def test_first_poll_needed_starts_phone_grace() -> None:
     data = VerovalBleDeviceData(monotonic=clock)
     dumps = {"n": 0}
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         dumps["n"] += 1
         return _dump_result()
 
@@ -525,7 +525,7 @@ def test_after_dump_no_new_grace_until_window_gap() -> None:
     clock = _FakeClock(50.0)
     data = VerovalBleDeviceData(monotonic=clock)
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return _dump_result()
 
     _coordinator.dump_latest = fake_dump
@@ -546,7 +546,7 @@ def test_ad_silence_after_dump_starts_phone_grace() -> None:
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return _dump_result()
 
     _coordinator.dump_latest = fake_dump
@@ -591,7 +591,7 @@ def test_force_dump_clears_grace_and_skipped_window() -> None:
     data.mark_window_ended()
     assert data._window_skipped is True
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return _dump_result()
 
     _coordinator.dump_latest = fake_dump
@@ -619,7 +619,7 @@ def test_successful_dump_sets_last_synchronized() -> None:
     data = VerovalBleDeviceData(utcnow=utc)
     result = _dump_result()
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return result
 
     _coordinator.dump_latest = fake_dump
@@ -641,7 +641,7 @@ def test_unchanged_cuff_timestamp_still_updates_last_synchronized() -> None:
     measurement = _sample_measurement()
     result = _dump_result(records=[measurement], selected=measurement)
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return result
 
     _coordinator.dump_latest = fake_dump
@@ -661,7 +661,7 @@ def test_unchanged_cuff_timestamp_still_updates_last_synchronized() -> None:
 def test_auth_error_does_not_set_last_synchronized() -> None:
     data = VerovalBleDeviceData(utcnow=_FakeUtc(datetime(2024, 6, 1, 10, 0, 0)))
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return SimpleNamespace(
             auth_error=True,
             missing_characteristic=False,
@@ -681,7 +681,7 @@ def test_auth_error_does_not_set_last_synchronized() -> None:
 def test_empty_dump_does_not_set_last_synchronized() -> None:
     data = VerovalBleDeviceData(utcnow=_FakeUtc(datetime(2024, 6, 1, 10, 0, 0)))
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return SimpleNamespace(
             auth_error=False,
             missing_characteristic=False,
@@ -701,7 +701,7 @@ def test_empty_dump_does_not_set_last_synchronized() -> None:
 def test_missing_characteristic_does_not_set_last_synchronized() -> None:
     data = VerovalBleDeviceData(utcnow=_FakeUtc(datetime(2024, 6, 1, 10, 0, 0)))
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return SimpleNamespace(
             auth_error=False,
             missing_characteristic=True,
@@ -755,7 +755,7 @@ def test_cached_ads_after_dump_do_not_block_next_window() -> None:
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return _dump_result()
 
     _coordinator.dump_latest = fake_dump
@@ -792,6 +792,16 @@ def test_grace_dump_due_without_second_advertisement() -> None:
     assert data._polled_this_window is False
 
 
+def test_phone_grace_zero_allows_immediate_poll() -> None:
+    """Configure phone_grace_seconds=0 dumps without waiting for medi.connect."""
+    clock = _FakeClock(0.0)
+    settings = _const.VerovalBleSettings(phone_grace_seconds=0)
+    data = VerovalBleDeviceData(monotonic=clock, settings=settings)
+    assert data.poll_needed(SimpleNamespace(time=0.0), None) is True
+    assert data._grace_started_at == 0.0
+    assert data.grace_dump_due() is True
+
+
 def test_grace_timer_polls_without_second_ad() -> None:
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
@@ -819,7 +829,7 @@ def test_grace_timer_polls_without_second_ad() -> None:
 
     dumps = {"n": 0}
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         dumps["n"] += 1
         return _dump_result()
 
@@ -847,11 +857,11 @@ def test_coordinator_registers_uppercase_address() -> None:
 
 
 def test_bluez_rssi_after_idle_starts_advertising() -> None:
-    """HA cache replay is not live; BlueZ Device1 RSSI is."""
+    """HA cache replay is not live; BlueZ Device1 RSSI rising edge is."""
     clock = _FakeClock(0.0)
     data = VerovalBleDeviceData(monotonic=clock)
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         return _dump_result()
 
     _coordinator.dump_latest = fake_dump
@@ -868,6 +878,112 @@ def test_bluez_rssi_after_idle_starts_advertising() -> None:
     assert coordinator.rssi == -54
     assert coordinator.is_advertising is True
     assert data._grace_started_at == 10_000.0
+    assert data._bluez_rssi_present is True
+
+
+def test_cached_bluez_rssi_after_dump_does_not_open_new_window() -> None:
+    """Stale Device1 RSSI every 2s must not expire the poll window or reconnect."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    dumps = {"n": 0}
+
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
+        dumps["n"] += 1
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+    assert dumps["n"] == 1
+    data._last_ad_time = 0.0
+    data._last_live_ad_time = 0.0
+
+    tasks: list[object] = []
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(
+        state=_coordinator.CoreState.running,
+        async_create_task=lambda coro: tasks.append(coro) or coro.close(),
+    )
+    # First poll after dump: rising edge (may start grace if silence window).
+    # Simulate RSSI already present during the successful dump window.
+    data._bluez_rssi_present = True
+    coordinator.async_handle_bluez_rssi(-54)
+    assert dumps["n"] == 1
+    assert data._grace_started_at is None
+    assert data._polled_this_window is True
+
+    for offset in (
+        2.0,
+        AD_SILENCE_NEW_WINDOW_SECONDS,
+        POLL_WINDOW_GAP_SECONDS,
+        POLL_WINDOW_GAP_SECONDS + PHONE_GRACE_SECONDS,
+        POLL_WINDOW_GAP_SECONDS + PHONE_GRACE_SECONDS + 30.0,
+    ):
+        clock.now = offset
+        coordinator.async_handle_bluez_rssi(-54)
+        assert dumps["n"] == 1
+        assert data._grace_started_at is None
+        assert data._polled_this_window is True
+        assert data._window_records is not None
+    assert tasks == []
+    # Advertising must not stay latched by cached RSSI polls.
+    assert data.is_advertising(clock.now) is False
+
+
+def test_bluez_rssi_rising_edge_after_loss_starts_new_window() -> None:
+    """RSSI absent then present again is a new flash."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+    data._last_ad_time = 0.0
+    data._last_live_ad_time = 0.0
+    data._bluez_rssi_present = True
+
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    clock.now = 10_000.0
+    coordinator.async_handle_bluez_rssi(None)
+    assert data._bluez_rssi_present is False
+    assert data._grace_started_at is None
+
+    coordinator.async_handle_bluez_rssi(-60)
+    assert data._bluez_rssi_present is True
+    assert coordinator.rssi == -60
+    assert data._grace_started_at == 10_000.0
+    assert coordinator.is_advertising is True
+
+
+def test_ensure_grace_timer_does_not_rearm_after_elapsed() -> None:
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    scheduled: list[tuple[float, object]] = []
+
+    class _Handle:
+        def cancel(self) -> None:
+            return None
+
+    def call_later(delay: float, callback: object) -> _Handle:
+        scheduled.append((delay, callback))
+        return _Handle()
+
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(
+        loop=SimpleNamespace(call_later=call_later),
+        state=_coordinator.CoreState.running,
+    )
+
+    assert data.poll_needed(SimpleNamespace(time=0.0), None) is False
+    coordinator._ensure_grace_timer()
+    assert len(scheduled) == 1
+
+    clock.now = PHONE_GRACE_SECONDS
+    data._grace_timer = None
+    coordinator._ensure_grace_timer()
+    assert len(scheduled) == 1
 
 
 def test_bluez_connected_sets_is_connected() -> None:
@@ -901,3 +1017,71 @@ def test_bluez_rssi_watch_is_noop_without_create_task() -> None:
     coordinator.hass = SimpleNamespace()
     stop = coordinator.async_start_bluez_rssi_watch()
     stop()
+
+
+def test_coordinator_exposes_last_update_success() -> None:
+    coordinator = _make_coordinator(VerovalBleDeviceData())
+    assert coordinator.last_update_success is True
+
+
+def test_connected_listener_exception_does_not_abort_dump() -> None:
+    data = VerovalBleDeviceData()
+
+    def boom() -> None:
+        raise RuntimeError("last_update_success")
+
+    data.async_add_connected_listener(boom)
+    dumps = {"n": 0}
+
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
+        dumps["n"] += 1
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+
+    async def run() -> object:
+        return await data.async_poll(_FakeBleDevice(), cuff_user=1)
+
+    published = asyncio.run(run())
+    assert dumps["n"] == 1
+    assert published is not None
+    assert data._polled_this_window is True
+
+
+def test_bluez_rssi_watch_prefers_background_task() -> None:
+    created = {"background": 0, "tracked": 0}
+
+    async def fake_watch(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def create_background(coro: object, name: str | None = None) -> object:
+        created["background"] += 1
+        close = getattr(coro, "close", None)
+        if close is not None:
+            close()
+        return SimpleNamespace(cancel=lambda: None)
+
+    def create_task(coro: object, name: str | None = None) -> object:
+        created["tracked"] += 1
+        close = getattr(coro, "close", None)
+        if close is not None:
+            close()
+        return SimpleNamespace(cancel=lambda: None)
+
+    previous_supported = _coordinator.is_bluez_pairing_supported
+    previous_watch = _coordinator.async_watch_device_rssi
+    _coordinator.is_bluez_pairing_supported = lambda: True
+    _coordinator.async_watch_device_rssi = fake_watch
+    try:
+        coordinator = _make_coordinator(VerovalBleDeviceData())
+        coordinator.hass = SimpleNamespace(
+            async_create_background_task=create_background,
+            async_create_task=create_task,
+        )
+        stop = coordinator.async_start_bluez_rssi_watch()
+        stop()
+    finally:
+        _coordinator.is_bluez_pairing_supported = previous_supported
+        _coordinator.async_watch_device_rssi = previous_watch
+    assert created["background"] == 1
+    assert created["tracked"] == 0

@@ -44,6 +44,16 @@ class VerovalBleEntity(CoordinatorEntity[VerovalBleCoordinator]):
         )
 
     @property
+    def available(self) -> bool:
+        """Do not use CoordinatorEntity.available (needs last_update_success).
+
+        ``ActiveBluetoothDataUpdateCoordinator`` is not a
+        ``DataUpdateCoordinator``. Measurement entities override this for
+        sleepy-cuff semantics; the force-sync button stays available.
+        """
+        return True
+
+    @property
     def assumed_state(self) -> bool:
         """True when the cuff is not currently advertising."""
         return not self.coordinator.available

@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
 from .bluez_pair import async_unpair_address
-from .const import DOMAIN, normalize_ble_address
+from .const import DOMAIN, VerovalBleSettings, normalize_ble_address, settings_from_options
 from .coordinator import (
     VerovalBleConfigEntry,
     VerovalBleCoordinator,
@@ -25,6 +25,13 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
 ]
+
+
+async def _async_update_listener(
+    hass: HomeAssistant, entry: VerovalBleConfigEntry
+) -> None:
+    """Reload the entry when Configure options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 def _entry_address(entry: ConfigEntry) -> str:
@@ -53,7 +60,9 @@ def _other_entries_for_address(
 
 
 def _device_data_for_address(
-    hass: HomeAssistant, address: str
+    hass: HomeAssistant,
+    address: str,
+    settings: VerovalBleSettings | None = None,
 ) -> VerovalBleDeviceData:
     """Return the shared GATT dump state for one cuff MAC."""
     domain_data: dict[str, VerovalBleDeviceData] = hass.data.setdefault(
@@ -62,8 +71,10 @@ def _device_data_for_address(
     key = address.lower()
     device_data = domain_data.get(key)
     if device_data is None:
-        device_data = VerovalBleDeviceData()
+        device_data = VerovalBleDeviceData(settings=settings)
         domain_data[key] = device_data
+    elif settings is not None:
+        device_data.settings = settings
     return device_data
 
 
@@ -124,7 +135,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -
     address = normalize_ble_address(_entry_address(entry))
     _LOGGER.info("Setting up BPU26 %s", address)
 
-    device_data = _device_data_for_address(hass, address)
+    settings = settings_from_options(entry.options)
+    device_data = _device_data_for_address(hass, address, settings)
     coordinator = VerovalBleCoordinator(
         hass,
         address=address,
@@ -138,6 +150,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -
         coordinator.async_start()
     )
     entry.async_on_unload(coordinator.async_start_bluez_rssi_watch())
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     async_setup_services(hass)
     return True
 

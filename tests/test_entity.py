@@ -140,3 +140,11 @@ def test_device_level_unique_id_omits_cuff_user() -> None:
     assert not hasattr(entity, "_attr_translation_placeholders") or not getattr(
         entity, "_attr_translation_placeholders", None
     )
+
+
+def test_available_does_not_require_last_update_success() -> None:
+    """ActiveBluetooth coordinators have no last_update_success (HA 0.3.0 crash)."""
+    coordinator = SimpleNamespace(address="AA:BB:CC:DD:EE:FF", available=False)
+    entity = VerovalBleEntity(coordinator, EntityDescription("force_dump"))
+    assert entity.available is True
+    assert not hasattr(coordinator, "last_update_success")

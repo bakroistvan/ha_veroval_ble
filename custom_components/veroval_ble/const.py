@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
+
 DOMAIN = "veroval_ble"
 
 
 CONF_CUFF_USER = "cuff_user"
 CONF_PIN = "pin"
+
+# Config entry options (Configure UI).
+CONF_PHONE_GRACE_SECONDS = "phone_grace_seconds"
+CONF_AD_SILENCE_SECONDS = "ad_silence_seconds"
+CONF_ADVERTISE_LINGER_SECONDS = "advertise_linger_seconds"
+CONF_POLL_WINDOW_GAP_SECONDS = "poll_window_gap_seconds"
+CONF_DUMP_TIMEOUT_SECONDS = "dump_timeout_seconds"
+CONF_DUMP_IDLE_SECONDS = "dump_idle_seconds"
 
 SERVICE_FORCE_DUMP = "force_dump"
 
@@ -54,7 +66,114 @@ SCAN_TIMEOUT_SECONDS = 60
 # Not the cuff flash length. Range: 5–30 s. Must be << PHONE_GRACE_SECONDS.
 UPDATE_INTERVAL = 10
 
+# UI / clamp ranges for Configure options.
+PHONE_GRACE_RANGE = (0, 60)
+AD_SILENCE_RANGE = (10, 40)
+ADVERTISE_LINGER_RANGE = (6, 15)
+POLL_WINDOW_GAP_RANGE = (120, 300)
+DUMP_TIMEOUT_RANGE = (10, 60)
+DUMP_IDLE_RANGE = (1, 5)
+
 
 def normalize_ble_address(address: str) -> str:
     """Return the BLE address in the form HA's callback matcher indexes."""
     return address.upper()
+
+
+def _clamp_number(
+    value: Any,
+    default: float,
+    minimum: float,
+    maximum: float,
+    *,
+    as_int: bool = False,
+) -> float | int:
+    """Coerce *value* to a number in [minimum, maximum], else *default*."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(default)
+    if number != number:  # NaN
+        number = float(default)
+    number = max(minimum, min(maximum, number))
+    if as_int:
+        return int(round(number))
+    return number
+
+
+@dataclass(frozen=True, slots=True)
+class VerovalBleSettings:
+    """Per-cuff dump / advertise timing from entry options (or defaults)."""
+
+    phone_grace_seconds: int = PHONE_GRACE_SECONDS
+    ad_silence_seconds: int = AD_SILENCE_NEW_WINDOW_SECONDS
+    advertise_linger_seconds: int = CUFF_ADVERTISE_SECONDS
+    poll_window_gap_seconds: int = POLL_WINDOW_GAP_SECONDS
+    dump_timeout_seconds: float = DUMP_TIMEOUT_SECONDS
+    dump_idle_seconds: float = DUMP_IDLE_SECONDS
+
+
+def settings_from_options(options: Mapping[str, Any] | None) -> VerovalBleSettings:
+    """Build settings from config-entry options; missing keys use defaults."""
+    opts = options or {}
+    return VerovalBleSettings(
+        phone_grace_seconds=int(
+            _clamp_number(
+                opts.get(CONF_PHONE_GRACE_SECONDS, PHONE_GRACE_SECONDS),
+                PHONE_GRACE_SECONDS,
+                *PHONE_GRACE_RANGE,
+                as_int=True,
+            )
+        ),
+        ad_silence_seconds=int(
+            _clamp_number(
+                opts.get(CONF_AD_SILENCE_SECONDS, AD_SILENCE_NEW_WINDOW_SECONDS),
+                AD_SILENCE_NEW_WINDOW_SECONDS,
+                *AD_SILENCE_RANGE,
+                as_int=True,
+            )
+        ),
+        advertise_linger_seconds=int(
+            _clamp_number(
+                opts.get(CONF_ADVERTISE_LINGER_SECONDS, CUFF_ADVERTISE_SECONDS),
+                CUFF_ADVERTISE_SECONDS,
+                *ADVERTISE_LINGER_RANGE,
+                as_int=True,
+            )
+        ),
+        poll_window_gap_seconds=int(
+            _clamp_number(
+                opts.get(CONF_POLL_WINDOW_GAP_SECONDS, POLL_WINDOW_GAP_SECONDS),
+                POLL_WINDOW_GAP_SECONDS,
+                *POLL_WINDOW_GAP_RANGE,
+                as_int=True,
+            )
+        ),
+        dump_timeout_seconds=float(
+            _clamp_number(
+                opts.get(CONF_DUMP_TIMEOUT_SECONDS, DUMP_TIMEOUT_SECONDS),
+                DUMP_TIMEOUT_SECONDS,
+                *DUMP_TIMEOUT_RANGE,
+            )
+        ),
+        dump_idle_seconds=float(
+            _clamp_number(
+                opts.get(CONF_DUMP_IDLE_SECONDS, DUMP_IDLE_SECONDS),
+                DUMP_IDLE_SECONDS,
+                *DUMP_IDLE_RANGE,
+            )
+        ),
+    )
+
+
+def options_schema_defaults(options: Mapping[str, Any] | None = None) -> dict[str, int | float]:
+    """Return option values for the Configure form (merged with defaults)."""
+    settings = settings_from_options(options)
+    return {
+        CONF_PHONE_GRACE_SECONDS: settings.phone_grace_seconds,
+        CONF_AD_SILENCE_SECONDS: settings.ad_silence_seconds,
+        CONF_ADVERTISE_LINGER_SECONDS: settings.advertise_linger_seconds,
+        CONF_POLL_WINDOW_GAP_SECONDS: settings.poll_window_gap_seconds,
+        CONF_DUMP_TIMEOUT_SECONDS: int(settings.dump_timeout_seconds),
+        CONF_DUMP_IDLE_SECONDS: int(settings.dump_idle_seconds),
+    }

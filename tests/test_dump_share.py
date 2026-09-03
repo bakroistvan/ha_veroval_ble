@@ -124,7 +124,7 @@ def _load_coordinator() -> tuple[ModuleType, ModuleType, ModuleType]:
     if client_name not in sys.modules:
         client = ModuleType(client_name)
 
-        async def dump_latest(_ble_device: object, _cuff_user: int) -> object:
+        async def dump_latest(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
             raise AssertionError("dump_latest must be patched for dump-share tests")
 
         client.dump_latest = dump_latest
@@ -186,7 +186,7 @@ def _dump_result(
 def _patch_dump(records: list[BloodPressureMeasurement]) -> dict[str, int]:
     calls = {"n": 0}
 
-    async def fake_dump(_ble_device: object, cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, cuff_user: int, **_kwargs: object) -> object:
         calls["n"] += 1
         return _dump_result(records, cuff_user)
 
@@ -437,7 +437,7 @@ def test_window_end_allows_new_dump_and_clears_cache() -> None:
     ]
     calls = {"n": 0}
 
-    async def fake_dump(_ble_device: object, cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, cuff_user: int, **_kwargs: object) -> object:
         records = dumps[min(calls["n"], len(dumps) - 1)]
         calls["n"] += 1
         return _dump_result(records, cuff_user)
