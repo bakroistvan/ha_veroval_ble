@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-03
+
 ### Added
 
 - Capture session timer GUI (`python scripts/capture_session.py`) for wall-clock event marks (A–D, quality, HA-only, generic SIG BPS).
@@ -68,6 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Sensors: systolic, diastolic, pulse, measured time, user slot; irregular-pulse binary sensor.
 - HIL dump script and unit tests for parser, client, coordinator, and config flow.
 
+[0.4.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.4.0
 [0.3.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.3.0
 [0.2.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.2.0
 [0.1.0]: https://github.com/bakroistvan/ha_veroval_ble/releases/tag/0.1.0
