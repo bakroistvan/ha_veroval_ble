@@ -33,13 +33,6 @@
         "data": {
           "pin": "6-digit PIN"
         }
-      },
-      "user_slot": {
-        "title": "Which user?",
-        "description": "Choose the cuff memory slot this Home Assistant device should publish (**User 1** or **User 2**, same labels as the buttons). The GATT dump may still contain both slots; only the newest timestamp for this slot is used.\n\nA second person can add the same cuff later and pick the other user.",
-        "data": {
-          "cuff_user": "Cuff user"
-        }
       }
     },
     "progress": {
@@ -59,7 +52,7 @@
       "not_supported": "Device not supported",
       "no_devices_found": "No BPU26 cuff was found. Press User 1 or User 2 so Bluetooth flashes (~2 minutes), then try again.",
       "already_in_progress": "Configuration flow is already in progress",
-      "already_configured": "This cuff is already configured for both User 1 and User 2",
+      "already_configured": "This cuff is already configured",
       "pairing_not_supported": "In-UI pairing requires a Bluetooth adapter on the Home Assistant OS host (Linux BlueZ).",
       "proxy_not_supported": "This cuff was only seen via a Bluetooth proxy. Pairing needs the Home Assistant host adapter (built-in or USB). ESPHome Bluetooth Proxy cannot enter the cuff PIN.",
       "agent_unavailable": "Could not register the Bluetooth pairing agent. Close bluetoothctl if it is open, then try again.",
@@ -71,33 +64,35 @@
   "entity": {
     "sensor": {
       "systolic": {
-        "name": "Systolic"
+        "name": "Systolic (User {user})"
       },
       "diastolic": {
-        "name": "Diastolic"
+        "name": "Diastolic (User {user})"
       },
       "pulse": {
-        "name": "Pulse"
+        "name": "Pulse (User {user})"
       },
       "timestamp": {
-        "name": "Measured time"
-      },
-      "user_slot": {
-        "name": "User slot"
+        "name": "Measured time (User {user})"
       },
       "rssi": {
         "name": "RSSI"
       },
       "last_synchronized": {
-        "name": "Last synchronized"
+        "name": "Last synchronized (User {user})"
       }
     },
     "binary_sensor": {
       "irregular_pulse": {
-        "name": "Irregular pulse"
+        "name": "Irregular pulse (User {user})"
       },
       "connected": {
         "name": "Connected"
+      }
+    },
+    "button": {
+      "force_dump": {
+        "name": "Force data sync"
       }
     }
   },
@@ -108,7 +103,7 @@
       "fields": {
         "device_id": {
           "name": "Device",
-          "description": "User slot to sync. Leave empty to sync every configured BPU26."
+          "description": "Cuff to sync. Leave empty to sync every configured BPU26."
         }
       }
     }

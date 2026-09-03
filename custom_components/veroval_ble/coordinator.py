@@ -30,17 +30,20 @@ from .const import (
     AD_SILENCE_NEW_WINDOW_SECONDS,
     BLUEZ_RSSI_POLL_SECONDS,
     CUFF_ADVERTISE_SECONDS,
-    DOMAIN,
     PHONE_GRACE_SECONDS,
     POLL_WINDOW_GAP_SECONDS,
     UPDATE_INTERVAL,
     normalize_ble_address,
 )
 from .parser import (
+    CUFF_USER_1,
+    CUFF_USER_2,
     BloodPressureMeasurement,
     cuff_user_to_ble_id,
     select_latest_for_user,
 )
+
+_CUFF_USERS = (CUFF_USER_1, CUFF_USER_2)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -246,16 +249,15 @@ class VerovalBleDeviceData:
     ) -> bool:
         """Return True when an advertisement should trigger a GATT dump.
 
-        Two-arg calls stay GATT-window-only (a dump in this window suppresses
-        another connect). Pass *cuff_user* so the other slot can consume the
-        shared dump without a second connection.
+        A dump in this window suppresses another connect. *cuff_user* is
+        accepted for older call sites; one poll now publishes both slots.
 
         A new window starts when *live* advertisements have been gone long
         enough (silence or idle unavailable), not only after
         ``POLL_WINDOW_GAP_SECONDS``. Cached scanner callbacks do not refresh
         the last-ad clock. A fresh GATT connect still waits
         ``PHONE_GRACE_SECONDS`` so medi.connect can take the transfer.
-        Shared-cache consume and ``force_dump`` do not.
+        ``force_dump`` does not.
         """
         now = self._monotonic()
         if not self._advertisement_is_live(service_info, now):
@@ -333,9 +335,9 @@ class VerovalBleDeviceData:
         If the phone-first grace is still open, treat disappearance as the
         phone grabbing the transfer and skip this window.
 
-        Keep ``_window_records`` / ``_consumed_slots`` so the other user slot
-        can still consume this window's dump. The next advertisement for a
-        slot that already consumed starts a new window (then grace).
+        Keep ``_window_records`` so a late consumer can still read this
+        window's dump. The next advertisement after a finished dump starts a
+        new window (then grace).
         """
         if self._poll_lock.locked():
             return
@@ -367,16 +369,23 @@ class VerovalBleDeviceData:
         self._awaiting_new_window = False
 
     async def async_poll(
-        self, ble_device: BLEDevice, cuff_user: int
-    ) -> BloodPressureMeasurement | None:
-        """Drain BPM indications and return the newest record for *cuff_user*."""
+        self, ble_device: BLEDevice, cuff_user: int | None = None
+    ) -> BloodPressureMeasurement | dict[int, BloodPressureMeasurement | None] | None:
+        """Drain BPM indications and publish newest records for both users.
+
+        If *cuff_user* is set, return that slot's measurement (tests and older
+        call sites). Otherwise return a map of both slots.
+        """
         async with self._poll_lock:
             async with _address_lock(ble_device.address):
-                return await self._async_poll_locked(ble_device, cuff_user)
+                published = await self._async_poll_locked(ble_device)
+        if cuff_user is not None:
+            return published.get(cuff_user)
+        return published
 
     async def async_force_poll(
-        self, ble_device: BLEDevice, cuff_user: int
-    ) -> BloodPressureMeasurement | None:
+        self, ble_device: BLEDevice, cuff_user: int | None = None
+    ) -> BloodPressureMeasurement | dict[int, BloodPressureMeasurement | None] | None:
         """Clear window skip and dump now (debug / manual sync)."""
         self._begin_new_window("force dump")
         return await self.async_poll(ble_device, cuff_user)
@@ -393,31 +402,34 @@ class VerovalBleDeviceData:
         return self._publish_from_records(self._window_records, cuff_user)
 
     async def _async_poll_locked(
-        self, ble_device: BLEDevice, cuff_user: int
-    ) -> BloodPressureMeasurement | None:
+        self, ble_device: BLEDevice
+    ) -> dict[int, BloodPressureMeasurement | None]:
         """Run one connect → notify → idle-or-timeout → disconnect cycle."""
-        if (
-            self._window_records is not None
-            and cuff_user not in self._consumed_slots
-        ):
-            return self._publish_from_records(self._window_records, cuff_user)
+        if self._window_records is not None:
+            return self._publish_all_slots(self._window_records)
 
         self._window_records = None
         self._consumed_slots.clear()
 
         self._notify_connected()
         try:
-            result = await dump_latest(ble_device, cuff_user)
+            result = await dump_latest(ble_device, CUFF_USER_1)
         finally:
             self._notify_connected()
-        if result.auth_error or result.missing_characteristic:
-            return self.last_measurement.get(cuff_user)
-
-        if not result.records:
-            return self.last_measurement.get(cuff_user)
+        if result.auth_error or result.missing_characteristic or not result.records:
+            return {user: self.last_measurement.get(user) for user in _CUFF_USERS}
 
         self._window_records = result.records
-        return self._publish_from_records(result.records, cuff_user)
+        return self._publish_all_slots(result.records)
+
+    def _publish_all_slots(
+        self, records: list[BloodPressureMeasurement]
+    ) -> dict[int, BloodPressureMeasurement | None]:
+        """Select and stamp both cuff users from one dump."""
+        return {
+            cuff_user: self._publish_from_records(records, cuff_user)
+            for cuff_user in _CUFF_USERS
+        }
 
     def _publish_from_records(
         self,
@@ -444,23 +456,28 @@ class VerovalBleDeviceData:
 
         self.last_measurement[cuff_user] = selected
         self._last_published_timestamp[cuff_user] = selected.timestamp
+        _LOGGER.info(
+            "Latest reading User %s: systolic=%.0f mmHg diastolic=%.0f mmHg pulse=%.0f bpm",
+            cuff_user,
+            selected.systolic,
+            selected.diastolic,
+            selected.pulse,
+        )
         return selected
 
 
 class VerovalBleCoordinator(
-    ActiveBluetoothDataUpdateCoordinator[BloodPressureMeasurement | None]
+    ActiveBluetoothDataUpdateCoordinator[dict[int, BloodPressureMeasurement | None]]
 ):
-    """Advertisement-driven coordinator that stores the last selected measurement."""
+    """Advertisement-driven coordinator that stores the last selected measurements."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         address: str,
-        cuff_user: int,
         device_data: VerovalBleDeviceData,
     ) -> None:
-        """Initialize the coordinator for one address + cuff user slot."""
-        self.cuff_user = cuff_user
+        """Initialize the coordinator for one cuff MAC."""
         self.device_data = device_data
         self.rssi: int | None = None
         address = normalize_ble_address(address)
@@ -475,15 +492,19 @@ class VerovalBleCoordinator(
         )
         self.address = address
 
-    @property
-    def last_measurement(self) -> BloodPressureMeasurement | None:
-        """Last published measurement for this coordinator's cuff user."""
-        return self.device_data.last_measurement.get(self.cuff_user)
+    def measurement_for(
+        self, cuff_user: int | None
+    ) -> BloodPressureMeasurement | None:
+        """Last published measurement for *cuff_user*, or None."""
+        if cuff_user is None:
+            return None
+        return self.device_data.last_measurement.get(cuff_user)
 
-    @property
-    def last_synchronized(self) -> datetime | None:
-        """Home Assistant time of the last successful dump for this cuff user."""
-        return self.device_data.last_synchronized.get(self.cuff_user)
+    def last_synchronized_for(self, cuff_user: int | None) -> datetime | None:
+        """Home Assistant time of the last successful dump for *cuff_user*."""
+        if cuff_user is None:
+            return None
+        return self.device_data.last_synchronized.get(cuff_user)
 
     @property
     def is_advertising(self) -> bool:
@@ -537,32 +558,15 @@ class VerovalBleCoordinator(
             )
             return
         _LOGGER.debug(
-            "Phone grace elapsed; polling %s cuff_user=%s (no further ads)",
+            "Phone grace elapsed; polling %s (no further ads)",
             self.address,
-            self.cuff_user,
         )
-        measurement = await self.device_data.async_poll(
-            connectable_device, self.cuff_user
-        )
-        self._publish_shared_slots(measurement)
-
-    def _publish_shared_slots(
-        self, measurement: BloodPressureMeasurement | None
-    ) -> None:
-        """Publish this slot and let the other user consume the same dump."""
-        self.async_publish_measurement(measurement)
-        config_entries = getattr(self.hass, "config_entries", None)
-        async_entries = getattr(config_entries, "async_entries", None)
-        if async_entries is None:
-            return
-        for entry in async_entries(DOMAIN):
-            other = getattr(entry, "runtime_data", None)
-            if not isinstance(other, VerovalBleCoordinator) or other is self:
-                continue
-            if other.address.lower() != self.address.lower():
-                continue
-            other.async_publish_measurement(
-                other.device_data.consume_shared_dump(other.cuff_user)
+        measurements = await self.device_data.async_poll(connectable_device)
+        if isinstance(measurements, dict):
+            self.async_publish_measurements(measurements)
+        else:
+            self.async_publish_measurements(
+                {user: self.measurement_for(user) for user in _CUFF_USERS}
             )
 
     def async_start_bluez_rssi_watch(self) -> Callable[[], None]:
@@ -618,7 +622,7 @@ class VerovalBleCoordinator(
             )
         sighting = _live_sighting(self.address, now)
         last_poll = getattr(self, "_last_poll", None)
-        needed = self.device_data.poll_needed(sighting, last_poll, self.cuff_user)
+        needed = self.device_data.poll_needed(sighting, last_poll)
         self._ensure_grace_timer()
         if needed:
             create_task = getattr(self.hass, "async_create_task", None)
@@ -639,10 +643,13 @@ class VerovalBleCoordinator(
                 self.address,
             )
             return
-        measurement = await self.device_data.async_poll(
-            connectable_device, self.cuff_user
-        )
-        self._publish_shared_slots(measurement)
+        measurements = await self.device_data.async_poll(connectable_device)
+        if isinstance(measurements, dict):
+            self.async_publish_measurements(measurements)
+        else:
+            self.async_publish_measurements(
+                {user: self.measurement_for(user) for user in _CUFF_USERS}
+            )
 
     def _async_needs_poll(
         self,
@@ -652,9 +659,7 @@ class VerovalBleCoordinator(
         """Poll when HA is running, a connectable path exists, and the dump is due."""
         if self.hass.state is not CoreState.running:
             return False
-        needed = self.device_data.poll_needed(
-            service_info, last_poll, self.cuff_user
-        )
+        needed = self.device_data.poll_needed(service_info, last_poll)
         self._ensure_grace_timer()
         if not needed:
             return False
@@ -663,16 +668,15 @@ class VerovalBleCoordinator(
         ):
             return True
         _LOGGER.debug(
-            "Skipping poll for %s cuff_user=%s: no connectable BLEDevice",
+            "Skipping poll for %s: no connectable BLEDevice",
             service_info.device.address,
-            self.cuff_user,
         )
         return False
 
     async def _async_poll_service(
         self, service_info: BluetoothServiceInfoBleak
-    ) -> BloodPressureMeasurement | None:
-        """Resolve a connectable BLEDevice and drain the dump for this slot."""
+    ) -> dict[int, BloodPressureMeasurement | None]:
+        """Resolve a connectable BLEDevice and drain the dump for both slots."""
         if service_info.connectable:
             connectable_device = service_info.device
         elif device := async_ble_device_from_address(
@@ -683,15 +687,15 @@ class VerovalBleCoordinator(
             raise RuntimeError(
                 f"No connectable device found for {service_info.device.address}"
             )
-        _LOGGER.debug(
-            "Polling %s cuff_user=%s ble_user_id=%s",
-            connectable_device.address,
-            self.cuff_user,
-            cuff_user_to_ble_id(self.cuff_user),
-        )
-        return await self.device_data.async_poll(connectable_device, self.cuff_user)
+        _LOGGER.debug("Polling %s (both user slots)", connectable_device.address)
+        measurements = await self.device_data.async_poll(connectable_device)
+        if isinstance(measurements, dict):
+            return measurements
+        return {user: self.measurement_for(user) for user in _CUFF_USERS}
 
-    async def async_force_poll(self) -> BloodPressureMeasurement | None:
+    async def async_force_poll(
+        self,
+    ) -> dict[int, BloodPressureMeasurement | None]:
         """Connect now and drain the dump, ignoring advertise-window skip."""
         connectable_device = async_ble_device_from_address(
             self.hass, self.address, connectable=True
@@ -701,28 +705,23 @@ class VerovalBleCoordinator(
                 f"No connectable BPU26 at {self.address}. "
                 "Press User 1 or User 2 so Bluetooth flashes."
             )
-        _LOGGER.info(
-            "Force dump %s cuff_user=%s ble_user_id=%s",
-            connectable_device.address,
-            self.cuff_user,
-            cuff_user_to_ble_id(self.cuff_user),
-        )
-        measurement = await self.device_data.async_force_poll(
-            connectable_device, self.cuff_user
-        )
-        self.async_publish_measurement(measurement)
-        return measurement
+        _LOGGER.info("Force dump %s (both user slots)", connectable_device.address)
+        measurements = await self.device_data.async_force_poll(connectable_device)
+        if not isinstance(measurements, dict):
+            measurements = {user: self.measurement_for(user) for user in _CUFF_USERS}
+        self.async_publish_measurements(measurements)
+        return measurements
 
     @callback
-    def async_publish_measurement(
-        self, measurement: BloodPressureMeasurement | None
+    def async_publish_measurements(
+        self, measurements: dict[int, BloodPressureMeasurement | None]
     ) -> None:
-        """Push a dump result to entities.
+        """Push both slots' dump results to entities.
 
         ``ActiveBluetoothDataUpdateCoordinator`` is not a
         ``DataUpdateCoordinator`` and has no ``async_set_updated_data``.
         """
-        self.data = measurement
+        self.data = measurements
         self.async_update_listeners()
 
     @callback

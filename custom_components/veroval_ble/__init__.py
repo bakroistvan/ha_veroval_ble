@@ -7,9 +7,10 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
 from .bluez_pair import async_unpair_address
-from .const import CONF_CUFF_USER, DOMAIN, normalize_ble_address
+from .const import DOMAIN, normalize_ble_address
 from .coordinator import (
     VerovalBleConfigEntry,
     VerovalBleCoordinator,
@@ -19,17 +20,24 @@ from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
+]
 
 
 def _entry_address(entry: ConfigEntry) -> str:
-    """BLE address from entry data, or unique_id before the cuff-user suffix."""
+    """BLE address from entry data, or unique_id before a cuff-user suffix."""
     address = entry.data.get(CONF_ADDRESS)
     if address:
         return str(address)
     unique_id = entry.unique_id
     assert unique_id is not None
-    return unique_id.rsplit("_", 1)[0]
+    lowered = unique_id.lower()
+    if lowered.endswith("_1") or lowered.endswith("_2"):
+        return unique_id.rsplit("_", 1)[0]
+    return unique_id
 
 
 def _other_entries_for_address(
@@ -59,17 +67,67 @@ def _device_data_for_address(
     return device_data
 
 
+def _merge_legacy_slot_devices(hass: HomeAssistant, address: str) -> None:
+    """Fold 0.2.0 per-slot devices into the single cuff device."""
+    registry = dr.async_get(hass)
+    addr = address.lower()
+    for suffix in ("1", "2"):
+        device = registry.async_get_device(identifiers={(DOMAIN, f"{addr}_{suffix}")})
+        if device is None:
+            continue
+        registry.async_update_device(
+            device.id,
+            merge_identifiers={(DOMAIN, addr)},
+            merge_connections={(dr.CONNECTION_BLUETOOTH, addr)},
+        )
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate a 0.2.0 per-slot entry onto one config entry per cuff."""
+    if entry.version > 2:
+        return False
+    if entry.version != 1:
+        return True
+
+    address = normalize_ble_address(_entry_address(entry))
+    addr_key = address.lower()
+    siblings = _other_entries_for_address(hass, entry, addr_key)
+    already_migrated = [
+        other
+        for other in siblings
+        if other.version >= 2
+        and (other.unique_id or "").lower() == addr_key
+    ]
+    if already_migrated:
+        _LOGGER.info(
+            "Removing leftover User-slot entry %s; cuff %s is already migrated",
+            entry.unique_id,
+            address,
+        )
+        hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+        return False
+
+    _merge_legacy_slot_devices(hass, address)
+    hass.config_entries.async_update_entry(
+        entry,
+        unique_id=addr_key,
+        title="BPU26",
+        data={CONF_ADDRESS: address},
+        version=2,
+    )
+    _LOGGER.info("Migrated BPU26 %s to a single config entry", address)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: VerovalBleConfigEntry) -> bool:
     """Set up Veroval BLE from a config entry."""
     address = normalize_ble_address(_entry_address(entry))
-    cuff_user = int(entry.data[CONF_CUFF_USER])
-    _LOGGER.info("Setting up BPU26 %s User %s", address, cuff_user)
+    _LOGGER.info("Setting up BPU26 %s", address)
 
     device_data = _device_data_for_address(hass, address)
     coordinator = VerovalBleCoordinator(
         hass,
         address=address,
-        cuff_user=cuff_user,
         device_data=device_data,
     )
     entry.runtime_data = coordinator
