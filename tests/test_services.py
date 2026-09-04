@@ -176,7 +176,7 @@ def _load_services() -> tuple[ModuleType, ModuleType, ModuleType]:
     if client_name not in sys.modules:
         client = ModuleType(client_name)
 
-        async def dump_latest(_ble_device: object, _cuff_user: int) -> object:
+        async def dump_latest(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
             raise AssertionError("dump_latest must be patched")
 
         client.dump_latest = dump_latest
@@ -321,7 +321,7 @@ def test_force_dump_one_gatt_for_two_slots() -> None:
     )
     calls = {"n": 0}
 
-    async def fake_dump(_ble_device: object, _cuff_user: int) -> object:
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
         calls["n"] += 1
         return _dump_result([user1, user2])
 
