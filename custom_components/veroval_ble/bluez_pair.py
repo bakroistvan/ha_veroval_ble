@@ -257,8 +257,8 @@ def rssi_from_device_props(props: dict[str, Any]) -> int | None:
     RSSI is usually absent while Connected is true (GATT link up) and while
     the cuff is fully asleep. GetManagedObjects can still keep a stale RSSI
     value after the flash ends — presence alone is not a new advertisement
-    packet. The coordinator treats absent→present as a rising edge only.
-    Cached Name / ManufacturerData remain regardless of RSSI.
+    packet. The coordinator treats absent→present or an RSSI value change as
+    a sighting (issue #37). Cached Name / ManufacturerData remain regardless.
     """
     if "RSSI" not in props:
         return None

@@ -903,9 +903,9 @@ def test_cached_bluez_rssi_after_dump_does_not_open_new_window() -> None:
         state=_coordinator.CoreState.running,
         async_create_task=lambda coro: tasks.append(coro) or coro.close(),
     )
-    # First poll after dump: rising edge (may start grace if silence window).
     # Simulate RSSI already present during the successful dump window.
     data._bluez_rssi_present = True
+    data._last_bluez_rssi = -54
     coordinator.async_handle_bluez_rssi(-54)
     assert dumps["n"] == 1
     assert data._grace_started_at is None
@@ -942,19 +942,68 @@ def test_bluez_rssi_rising_edge_after_loss_starts_new_window() -> None:
     data._last_ad_time = 0.0
     data._last_live_ad_time = 0.0
     data._bluez_rssi_present = True
+    data._last_bluez_rssi = -54
 
     coordinator = _make_coordinator(data)
     coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
     clock.now = 10_000.0
     coordinator.async_handle_bluez_rssi(None)
     assert data._bluez_rssi_present is False
+    assert data._last_bluez_rssi is None
     assert data._grace_started_at is None
 
     coordinator.async_handle_bluez_rssi(-60)
     assert data._bluez_rssi_present is True
+    assert data._last_bluez_rssi == -60
     assert coordinator.rssi == -60
     assert data._grace_started_at == 10_000.0
     assert coordinator.is_advertising is True
+
+
+def test_bluez_rssi_value_change_while_cached_starts_new_window() -> None:
+    """Stale Device1 RSSI that never clears: a dBm change is a new flash (#37)."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+
+    async def fake_dump(_ble_device: object, _cuff_user: int, **_kwargs: object) -> object:
+        return _dump_result()
+
+    _coordinator.dump_latest = fake_dump
+    asyncio.run(data.async_poll(_FakeBleDevice(), cuff_user=1))
+    data._last_ad_time = 0.0
+    data._last_live_ad_time = 0.0
+    data._bluez_rssi_present = True
+    data._last_bluez_rssi = -55
+
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    clock.now = 10_000.0
+
+    coordinator.async_handle_bluez_rssi(-55)
+    assert data._grace_started_at is None
+
+    coordinator.async_handle_bluez_rssi(-45)
+    assert data._last_bluez_rssi == -45
+    assert coordinator.rssi == -45
+    assert data._grace_started_at == 10_000.0
+    assert coordinator.is_advertising is True
+
+
+def test_bluez_rssi_change_ignored_while_connected() -> None:
+    """GATT Connected: update RSSI diagnostic only, do not start grace."""
+    clock = _FakeClock(0.0)
+    data = VerovalBleDeviceData(monotonic=clock)
+    data._bluez_rssi_present = True
+    data._last_bluez_rssi = -55
+    data.bluez_connected = True
+
+    coordinator = _make_coordinator(data)
+    coordinator.hass = SimpleNamespace(state=_coordinator.CoreState.running)
+    clock.now = 10_000.0
+    coordinator.async_handle_bluez_rssi(-40)
+    assert coordinator.rssi == -40
+    assert data._last_bluez_rssi == -40
+    assert data._grace_started_at is None
 
 
 def test_ensure_grace_timer_does_not_rearm_after_elapsed() -> None:

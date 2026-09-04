@@ -117,8 +117,10 @@ class VerovalBleDeviceData:
         self._grace_timer: object | None = None
         self._window_skipped = False
         self.bluez_connected = False
-        # Rising-edge only: cached Device1 RSSI is not a new advertisement.
+        # Device1 RSSI often stays cached while the cuff sleeps (issue #37).
+        # Sightings use absent→present or a value change, never "still present".
         self._bluez_rssi_present = False
+        self._last_bluez_rssi: int | None = None
         self._connected_listeners: list[Callable[[], None]] = []
 
     def async_add_connected_listener(
@@ -650,33 +652,47 @@ class VerovalBleCoordinator(
 
     @callback
     def async_handle_bluez_rssi(self, rssi: int | None) -> None:
-        """Treat Device1 RSSI absent→present as one live advertisement.
+        """Treat Device1 RSSI absent→present or value change as a live ad.
 
-        Cached RSSI still present on GetManagedObjects is not a new packet:
-        update the diagnostic value only. Falling edge clears the rising-edge
-        latch so the next flash can start a dump window.
+        BlueZ often keeps a stale RSSI while the cuff sleeps (issue #37), so
+        presence alone is not a new packet. A changed dBm (for example
+        -55→-45 when the cuff flashes) is. Same value every poll is ignored.
+        Falling edge clears the latch for a later rising edge.
         """
         if self.hass.state is not CoreState.running:
             return
         data = self.device_data
         if rssi is None:
             data._bluez_rssi_present = False
+            data._last_bluez_rssi = None
             self.async_update_listeners()
             return
 
-        rising = not data._bluez_rssi_present
+        was_present = data._bluez_rssi_present
+        prev_rssi = data._last_bluez_rssi
         data._bluez_rssi_present = True
+        data._last_bluez_rssi = rssi
         self.rssi = rssi
-        if not rising:
+
+        # Skip dump triggers while GATT is up; still refresh diagnostic RSSI.
+        if data.bluez_connected or data._poll_lock.locked():
+            self.async_update_listeners()
+            return
+
+        rising = not was_present
+        changed = prev_rssi is not None and prev_rssi != rssi
+        if not rising and not changed:
             self.async_update_listeners()
             return
 
         now = data._monotonic()
         if not data.is_advertising(now):
+            reason = "rising edge" if rising else f"change {prev_rssi}->{rssi}"
             _LOGGER.debug(
-                "BlueZ Device1 RSSI %s for %s (HA scanner had no live ad)",
+                "BlueZ Device1 RSSI %s for %s (%s; HA scanner had no live ad)",
                 rssi,
                 self.address,
+                reason,
             )
         sighting = _live_sighting(self.address, now)
         last_poll = getattr(self, "_last_poll", None)

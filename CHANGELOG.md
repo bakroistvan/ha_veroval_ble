@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- BlueZ Device1 RSSI that stays cached while the cuff sleeps can start a dump again when the dBm value changes (issue #37), not only on absent→present.
+
 ## [0.4.0] - 2026-09-03
 
 ### Added
