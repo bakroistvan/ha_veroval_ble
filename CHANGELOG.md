@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Document User-button vs post-measurement advertise (issue #29): ADV_IND fields and medi.connect GATT are the same; HA miss is not a distinct cuff PDU.
 
+### Fixed
+
+- Systolic, diastolic, and pulse are logged at DEBUG instead of INFO, so pasted Home Assistant logs do not include blood-pressure readings (#39).
+
 ## [0.3.0] - 2026-09-03
 
 ### Added

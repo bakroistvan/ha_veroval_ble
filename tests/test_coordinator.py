@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+
+import pytest
 
 _PKG = "veroval_ble_coordinator_test"
 _ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "veroval_ble"
@@ -192,6 +195,39 @@ def _make_coordinator(device_data: object) -> object:
         address="AA:BB:CC:DD:EE:FF",
         device_data=device_data,
     )
+
+
+def test_published_reading_stays_out_of_info_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A newly published slot logs systolic/diastolic/pulse at DEBUG only."""
+    data = VerovalBleDeviceData(monotonic=_FakeClock(50.0))
+    measurement = BloodPressureMeasurement(
+        flags=0x1E,
+        systolic=137.0,
+        diastolic=86.0,
+        mean_arterial=103.0,
+        timestamp=datetime(2024, 6, 1, 8, 30, 0),
+        pulse=64.0,
+        user_id=0,
+        status=0,
+        raw=bytes.fromhex("deadbeef"),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=_coordinator.__name__):
+        published = data._publish_from_records([measurement], 1)
+
+    assert published is measurement
+    records = [
+        record for record in caplog.records if record.name == _coordinator.__name__
+    ]
+    info = [record.getMessage() for record in records if record.levelno >= logging.INFO]
+    debug = [record.getMessage() for record in records if record.levelno == logging.DEBUG]
+    reading = "Latest reading User 1: systolic=137 mmHg diastolic=86 mmHg pulse=64 bpm"
+    assert all(
+        token not in message for message in info for token in ("137", "86", "64", "mmHg")
+    )
+    assert reading in debug
 
 
 def test_dump_sets_window_flag_so_immediate_poll_needed_is_false() -> None:
