@@ -138,12 +138,12 @@ Typical coordinator lines:
 
 | Level | What you see |
 |-------|----------------|
-| **DEBUG** | Advertisement seen; phone-first grace start / elapsed / skip; new advertise window; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); `stop_notify` and disconnect; config-flow steps; BlueZ Device1 snapshot; agent PIN request (not the PIN value); pairing stage tracebacks |
-| **INFO** | Config entry setup (cuff address); successful latest reading per user slot (systolic / diastolic / pulse / time, no raw hex); `Pair()` started; pair+trust succeeded |
+| **DEBUG** | Advertisement seen; phone-first grace start / elapsed / skip; new advertise window; poll started or skipped; connect; `start_notify`; dump count and per-user counts; **selected** record hex and decoded fields (not every payload); latest reading per user slot (systolic / diastolic / pulse); `stop_notify` and disconnect; config-flow steps; BlueZ Device1 snapshot; agent PIN request (not the PIN value); pairing stage tracebacks |
+| **INFO** | Config entry setup (cuff address); `Pair()` started; pair+trust succeeded; `Force dump` |
 | **WARNING** | Connect timeout, missing Blood Pressure Measurement characteristic, parse failure, pairing failures with the BlueZ error name and Device1 properties |
 | **ERROR** | Unexpected exceptions around a poll |
 
-Advertisements are not logged at INFO (the cuff can advertise for ~2 minutes). Health hex stays at DEBUG only.
+Advertisements are not logged at INFO (the cuff can advertise for ~2 minutes). Blood-pressure readings and health hex stay at DEBUG only, so a default log download does not include them.
 
 ## Pairing (Home Assistant OS)
 

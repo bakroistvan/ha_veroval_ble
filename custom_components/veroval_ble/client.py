@@ -256,7 +256,8 @@ async def dump_latest(device: BLEDevice, cuff_user: int) -> DumpResult:
         selected.user_id,
         selected.status,
     )
-    _LOGGER.info(
+    # Readings stay at DEBUG: people paste INFO logs into public issues.
+    _LOGGER.debug(
         "Latest reading User %s: systolic=%.0f mmHg diastolic=%.0f mmHg pulse=%.0f bpm",
         ble_id_to_cuff_user(ble_user_id),
         selected.systolic,

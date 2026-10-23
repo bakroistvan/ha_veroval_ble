@@ -456,7 +456,8 @@ class VerovalBleDeviceData:
 
         self.last_measurement[cuff_user] = selected
         self._last_published_timestamp[cuff_user] = selected.timestamp
-        _LOGGER.info(
+        # Readings stay at DEBUG: people paste INFO logs into public issues.
+        _LOGGER.debug(
             "Latest reading User %s: systolic=%.0f mmHg diastolic=%.0f mmHg pulse=%.0f bpm",
             cuff_user,
             selected.systolic,
